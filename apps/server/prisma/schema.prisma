@@ -1,0 +1,277 @@
+// 门窗材料库 · Prisma Schema
+// 由 packages/schema/src/material-catalog.ts 的 TS 接口转换而来（IMaterial / IInventory /
+// IMaterialCost / IInventoryTransaction / IBaseEntity），并已包含「重量 weightKg / 体积 volumeM3」。
+//
+// 使用方式：
+//   1) npm i -D prisma @prisma/client   （在 apps/server 下）
+//   2) 配置 .env: DATABASE_URL="postgresql://user:pass@localhost:5432/wdd"
+//   3) npx prisma migrate dev --name init
+//
+// 说明：价格字段用 Decimal 避免浮点误差；时间字段 DateTime 对应接口中的 ISO 字符串。
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============ 枚举（替代裸字符串，与 TS 联合类型一一对应） ============
+
+enum MaterialCategory {
+  profile // 型材
+  glass // 玻璃
+  hardware // 五金
+  accessory // 辅料
+  finished // 成品
+}
+
+enum MaterialStatus {
+  active
+  inactive
+}
+
+enum CostType {
+  fixed
+  variable
+}
+
+enum TransactionType {
+  inbound
+  outbound
+  adjust
+  transfer
+}
+
+// ============ 物料基础信息（IMaterial + IBaseEntity） ============
+
+model Material {
+  id          String           @id @default(uuid())
+  code        String           @unique // 物料编码（如 AL-6063-T5-01）
+  name        String
+  category    MaterialCategory
+  specModel   String           @default("") // 规格型号
+  color       String           @default("") // 颜色 / 表面处理
+  unit        String // 基本单位（米/平方米/个/公斤…）
+  brand       String           @default("")
+  description String?
+  barcode     String?          @unique
+  status      MaterialStatus   @default(active)
+
+  // ★ 重量 / 体积（新增字段）
+  weightKg    Float? // 单件重量（kg/单位）
+  volumeM3    Float? // 单件体积（m³/单位）
+
+  // 审计字段（IBaseEntity）
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+  createdBy   String?
+  updatedBy   String?
+  isDeleted   Boolean          @default(false) // 逻辑删除
+
+  inventory   Inventory[]
+  cost        MaterialCost?
+  transactions InventoryTransaction[]
+
+  @@index([category, status])
+  @@index([isDeleted])
+}
+
+// ============ 库存管理信息（IInventory） ============
+
+model Inventory {
+  materialId      String
+  warehouseId     String
+  locationCode    String // 库位编码（如 A-01-02）
+  currentQty      Int    @default(0)
+  lockedQty       Int    @default(0)
+  availableQty    Int    @default(0) // currentQty - lockedQty
+  safetyStock     Int    @default(0)
+  maxStock        Int?
+  lastInboundTime DateTime?
+  lastOutboundTime DateTime?
+
+  material        Material @relation(fields: [materialId], references: [id])
+
+  @@id([materialId, warehouseId, locationCode])
+  @@index([warehouseId, locationCode])
+}
+
+// ============ 采购与成本信息（IMaterialCost） ============
+
+model MaterialCost {
+  materialId        String   @id
+  defaultSupplierId String
+  unitPrice         Decimal  @db.Decimal(12, 2) // 标准单价
+  currency          String   @default("CNY")
+  leadTimeDays      Int      @default(7)
+  moq               Int      @default(1) // 最小起订量
+  costType          CostType @default(variable)
+  lastPurchasePrice Decimal  @db.Decimal(12, 2)
+  lastPurchaseDate  DateTime?
+
+  material          Material @relation(fields: [materialId], references: [id])
+}
+
+// ============ 出入库流水（IInventoryTransaction + IBaseEntity） ============
+
+model InventoryTransaction {
+  id              String          @id @default(uuid())
+  transactionType TransactionType
+  materialId      String
+  warehouseId     String? // 可选：兼容早期未记录仓库的流水
+  locationCode    String?
+  quantity        Int // 变动数量（正负表示方向）
+  beforeQty       Int
+  afterQty        Int
+  relatedDocNo    String // 关联单据号（PO-… / WO-…）
+  operatorId      String
+  operateTime     DateTime        @default(now())
+  remark          String?
+
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+  isDeleted       Boolean         @default(false)
+
+  material        Material        @relation(fields: [materialId], references: [id])
+
+  @@index([materialId, operateTime])
+  @@index([transactionType])
+  @@index([warehouseId, operateTime])
+}
+
+// ============ 仓库 / 库位主数据（IWarehouse） ============
+// 库位不拆独立实体，用 locations String[] 承载：
+// Inventory 的复合主键 (materialId, warehouseId, locationCode) 因此保持不变，
+// warehouseId / locationCode 与 Warehouse 之间是逻辑外键（不加 relation）。
+// 日后库位需要挂容量 / 负责人时再拆出 Location 模型。
+
+model Warehouse {
+  id        String         @id @default(uuid())
+  code      String         @unique // 仓库编码（WH01 / WH02 …）
+  name      String
+  address   String?
+  manager   String?
+  phone     String?
+  locations String[] // 库位编码列表（A-01-02 …）
+  isDefault Boolean        @default(false) // 默认仓（应用层保证全库仅一个）
+  status    MaterialStatus @default(active)
+  remark    String?
+
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+  createdBy String?
+  updatedBy String?
+  isDeleted Boolean        @default(false)
+
+  @@index([status, isDeleted])
+}
+
+
+// =====================================================================
+// 门窗客户管理系统（CRM）· 第一阶段 MVP
+// 关联前端 2D/3D 门窗设计器：
+//   DesignScheme.designData   —— Konva ShapeModel[] 完整 JSON（画布 100% 回显）
+//   DesignScheme.colorConfig  —— { outerColor, innerColor } 颜色配置
+// =====================================================================
+
+enum CustomerStatus {
+  A_HOT // A类：近期必买/高意向
+  B_WARM // B类：有需求在对比
+  C_COLD // C类：暂无需求/长期跟进
+  MEASURED // 已量尺
+  SIGNED // 已签约
+  LOST // 已流失
+}
+
+enum OrderStatus {
+  PENDING_PRODUCTION // 待排产
+  IN_PRODUCTION // 生产中
+  SHIPPED // 已发货
+  PENDING_INSTALL // 待安装
+  COMPLETED // 已完成
+  AFTER_SALES // 售后中
+}
+
+model Customer {
+  id        String         @id @default(cuid())
+  name      String // 客户姓名
+  phone     String         @unique // 联系电话（唯一索引，防重建档）
+  community String? // 小区名称
+  houseType String? // 房屋类型：新房/旧改/别墅
+  budget    Float? // 预算范围（万元）
+  source    String? // 来源：自然进店/转介绍/抖音/小区地推
+  status    CustomerStatus @default(C_COLD)
+
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+
+  followUps FollowUp[]
+  schemes   DesignScheme[]
+  orders    Order[]
+
+  @@index([status])
+  @@index([name])
+}
+
+model FollowUp {
+  id             String    @id @default(cuid())
+  customerId     String
+  customer       Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  content        String // 跟进内容摘要
+  nextFollowDate DateTime? // 下次跟进提醒时间
+
+  createdAt      DateTime  @default(now())
+
+  @@index([customerId, createdAt])
+  @@index([nextFollowDate])
+}
+
+model DesignScheme {
+  id          String   @id @default(cuid())
+  customerId  String
+  customer    Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  name        String // 方案名称（如：主卧-1500x1500-系统窗）
+  totalWidth  Int // 总宽 (mm)
+  totalHeight Int // 总高 (mm)
+  seriesName  String // 系列名称（如：108断桥）
+
+  // ★ 核心字段：存储 Konva 画布数据
+  colorConfig Json // { outerColor: '咖啡色', innerColor: '咖啡色' }
+  designData  Json // ShapeModel[] 完整 JSON 序列化（CanvasController.getModels()）
+
+  schemaVersion Int    @default(1) // 预留版本号：设计器数据格式升级时做兼容
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  orders      Order[]
+
+  @@index([customerId, updatedAt])
+}
+
+model Order {
+  id          String      @id @default(cuid())
+  customerId  String
+  customer    Customer    @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  schemeId    String?
+  scheme      DesignScheme? @relation(fields: [schemeId], references: [id])
+
+  status      OrderStatus @default(PENDING_PRODUCTION)
+
+  totalAmount Float // 订单总金额（元）
+  deposit     Float // 定金（元）
+  balance     Float // 尾款（元）
+  remark      String? // 订单备注
+
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  @@index([customerId, status])
+  @@index([schemeId])
+}

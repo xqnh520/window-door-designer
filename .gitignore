@@ -1,0 +1,42 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+build/
+out/
+release/
+
+# vite
+*.local
+
+# logs
+*.log
+npm-debug.log*
+
+# env
+.env
+.env.local
+.env.*.local
+
+# editor
+.idea/
+.vscode/
+*.iml
+
+# os
+Thumbs.db
+.DS_Store
+
+# electron
+apps/desktop/release/
+
+# server runtime data
+apps/server/data/
+data/
+
+# Visual Studio 缓存
+.vs/
+
+# 带时间戳的会话 dump（临时大文件，不入库）
+标注样式与拼框选中功能_2026-09-08_02-15.md

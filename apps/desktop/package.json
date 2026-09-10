@@ -1,0 +1,34 @@
+{
+  "name": "@wdd/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "main": "main.cjs",
+  "scripts": {
+    "dev": "npm run build --workspace @wdd/web && electron .",
+    "start": "electron .",
+    "build": "echo desktop-shell-ready",
+    "dist": "electron-builder",
+    "typecheck": "echo desktop-shell"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.wdd.desktop",
+    "productName": "门窗设计软件",
+    "files": [
+      "main.cjs",
+      "../web/dist/**/*"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    }
+  }
+}

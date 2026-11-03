@@ -5,9 +5,15 @@
  * 加载方向：旧 ShapeModel JSON → WindowAssembly（进入设计器前一次性迁移）
  */
 import type { MaterialLibrary } from '@wdd/schema';
-import { selectCurrentOpeningH, selectCurrentOpeningW, selectCurrentSeriesId, useStore } from '../store';
+import {
+  backupLegacyShapes,
+  selectCurrentOpeningH,
+  selectCurrentOpeningW,
+  selectCurrentSeriesId,
+  useStore,
+} from '../store';
 import { assemblyToShapes } from '../canvas/shapes3d';
-import { normalizeLegacyShapes } from '../canvas/legacyShapesImport';
+import { buildDesignModelFromLegacyShapes, normalizeLegacyShapesWithReport } from '../canvas/legacyShapesImport';
 import { projectDesignModel } from '../canvas/modelProjection';
 import type { ColorConfig, DesignScheme, ShapeModelJson } from './types';
 
@@ -30,7 +36,8 @@ export function collectDesignerPayload(): {
   const series = st.library.series.find((s) => s.id === seriesId) ?? st.library.series[0];
   const model = projectDesignModel(st);
   return {
-    shapes: st.assembly ? (assemblyToShapes(st.assembly, series) as ShapeModelJson[]) : [],
+    // CRM 兼容载荷保持展开态（加工空间）；转角显示变换只服务 3D 预览
+    shapes: st.assembly ? (assemblyToShapes(st.assembly, series, { space: 'processing' }) as ShapeModelJson[]) : [],
     colorConfig: { outerColor: st.orderConfig.outerColor, innerColor: st.orderConfig.innerColor },
     totalWidth: model?.openingW ?? selectCurrentOpeningW(st),
     totalHeight: model?.openingH ?? selectCurrentOpeningH(st),
@@ -45,15 +52,41 @@ export function collectDesignerPayload(): {
  */
 export function prepareCrmScheme(scheme: DesignScheme | null): void {
   const st = useStore.getState();
-  if (scheme) {
-    // 先断开上一方案，防止尺寸/系列更新写入旧装配体。
-    st.setWindowTree(null);
-    st.setOpeningSize(scheme.totalWidth, scheme.totalHeight);
-    st.setSeries(seriesNameToId(scheme.seriesName, st.library, selectCurrentSeriesId(st)));
-    st.setOrderConfig({ outerColor: scheme.colorConfig.outerColor, innerColor: scheme.colorConfig.innerColor });
-    st.importLegacyShapes(normalizeLegacyShapes(scheme.designData));
-  } else {
+  if (!scheme) {
+    // 新建方案：清空画布（仅网格），尺寸/系列/颜色沿用当前
     st.setWindowTree(null);
     st.importLegacyShapes([]);
+    return;
   }
+  // 迁移前备份 CRM 端原始 designData；迁移失败时原始数据仍可人工找回
+  backupLegacyShapes('crm-scheme', scheme.designData);
+  const report = normalizeLegacyShapesWithReport(scheme.designData);
+  if (report.shapes.length === 0 && report.dropped > 0) {
+    console.warn(`CRM 方案 ${scheme.id} 的旧画布有 ${report.dropped} 个图形无法识别：保留当前画布`);
+    return;
+  }
+  const seriesId = seriesNameToId(scheme.seriesName, st.library, selectCurrentSeriesId(st));
+  // 先纯构建验证一遍：失败就保持当前画布，绝不先清空再报错
+  if (report.shapes.length) {
+    const model = buildDesignModelFromLegacyShapes(report.shapes, {
+      design: {
+        id: scheme.id,
+        name: scheme.name,
+        openingW: scheme.totalWidth,
+        openingH: scheme.totalHeight,
+        seriesId,
+        glassId: st.design.glassId,
+      },
+    });
+    if (!model) {
+      console.warn(`CRM 方案 ${scheme.id} 旧画布迁移失败：已备份原始数据，保留当前画布`);
+      return;
+    }
+  }
+  // 先断开上一方案，防止尺寸/系列更新写入旧装配体。
+  st.setWindowTree(null);
+  st.setOpeningSize(scheme.totalWidth, scheme.totalHeight);
+  st.setSeries(seriesId);
+  st.setOrderConfig({ outerColor: scheme.colorConfig.outerColor, innerColor: scheme.colorConfig.innerColor });
+  st.importLegacyShapes(report.shapes);
 }

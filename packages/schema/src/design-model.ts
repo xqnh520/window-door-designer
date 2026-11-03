@@ -51,10 +51,16 @@ export const DesignComponentSchema = z.object({
     ])
     .optional(),
   sourceShapeId: z.string().optional(),
+  /** 异形外框梯形顶边宽比（0..1，仅 shape 为梯形族时有意义；旧数据由 topRatio 迁移） */
+  topRatio: z.number().min(0).max(1).optional(),
   /** 外框缺边（开放框 / 传递窗 / 吧台窗 / 肯德基门落地洞）：被缺的那条边不画料、不出型材 */
   openSides: z.array(z.enum(['up', 'down', 'left', 'right'])).optional(),
   /** 非轴对齐中梃带（弧带 / 斜带）的中心线长度（mm）；有值时 BOM 按它出料而非 w/h */
   arcLenMm: z.number().positive().optional(),
+  /** 中梃垂直于料的真实厚度（mm）：斜带 / 弧带的 bbox 看不出厚度，迁移与往返时必须显式携带 */
+  thicknessMm: z.number().positive().optional(),
+  /** 弧梃弧高（mm，相对中心线弦，正=朝左/上凸）：旧方案迁移与容器树往返用 */
+  sagittaMm: z.number().optional(),
   /** 斜梃朝向：diagonal=↘（平行左上→右下对角线），antiDiagonal=↗；仅 mullion 使用 */
   slope: z.enum(['diagonal', 'antiDiagonal']).optional(),
   /** 扇叶数：2=对开扇（一个构件两片扇，中缝为两根对开料）；缺省=单扇 */

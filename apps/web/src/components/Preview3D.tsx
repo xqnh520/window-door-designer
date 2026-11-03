@@ -4,8 +4,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { focusedTreeFromAssembly, selectCurrentSeriesId, useStore } from '../store';
 import { colorHex } from './studio/palette';
-import { sampleOutline } from '../canvas/model';
-import { arcChainOf, arcFromChord, insetPolygon, polygonArea, sashWidthOf } from '@wdd/core';
+import { arcChainOf, arcFromChord, insetPolygon, polygonArea, sampleOutline, sashWidthOf, type FrameShape } from '@wdd/core';
 import { assemblyToShapes, assemblySize } from '../canvas/shapes3d';
 import type { LegacyShape } from '../canvas/legacyShape';
 
@@ -17,7 +16,9 @@ type Pt2 = { x: number; y: number };
  */
 function outlineOf(s: LegacyShape, inset: number): Pt2[] {
   const c = s.contour;
-  if (!c || c.length < 3) return sampleOutline(s, inset);
+  if (!c || c.length < 3) {
+    return sampleOutline(s.type as FrameShape, s.bbox, { inset, topRatio: s.topRatio || 0.6 });
+  }
   let off = inset;
   while (off > 0) {
     const pts = insetPolygon(c, off);
@@ -388,8 +389,8 @@ export function Preview3D() {
             { x: b.x + offI, y: b.y + offI + ih },
           ];
         } else {
-          oPts = sampleOutline(s, offO);
-          iPts = sampleOutline(s, offI);
+          oPts = sampleOutline(s.type as FrameShape, s.bbox, { inset: offO, topRatio: s.topRatio || 0.6 });
+          iPts = sampleOutline(s.type as FrameShape, s.bbox, { inset: offI, topRatio: s.topRatio || 0.6 });
         }
         if (oPts.length < 3 || iPts.length < 3) return null;
         const shape = new THREE.Shape();

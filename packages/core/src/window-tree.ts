@@ -61,6 +61,11 @@ export interface WindowTree {
   topRatio?: number;
   /** 缺边（开放框/传递窗/吧台窗/落地门洞）：被缺的边不画框料也不出型材；缺省四边齐全 */
   frameOpenSides?: FrameSide[];
+  /**
+   * 自定义外框轮廓（mm，相对外框左上角的局部坐标，闭合多边形）。
+   * 用于旧方案里无法用 frameShape 枚举表达的异形轮廓；存在时布局/描述/出料一律优先于 frameShape 采样。
+   */
+  frameContour?: Pt[];
   /** 窗口世界坐标偏移（mm，默认 0,0；外框左/上边拖拽时变化） */
   offsetX?: number;
   offsetY?: number;
@@ -806,6 +811,8 @@ export function createWindowTree(opts: {
   topRatio?: number;
   /** 缺边（开放框/传递窗/落地门洞） */
   frameOpenSides?: FrameSide[];
+  /** 自定义外框轮廓（局部坐标，见 WindowTree.frameContour） */
+  frameContour?: Pt[];
 }): WindowTree {
   return {
     id: randomId(),
@@ -821,6 +828,7 @@ export function createWindowTree(opts: {
     frameShape: opts.frameShape,
     topRatio: opts.topRatio,
     frameOpenSides: opts.frameOpenSides,
+    frameContour: opts.frameContour,
     root: { id: randomId(), kind: 'area', xr: 0, yr: 0, wr: 1, hr: 1 },
   };
 }
@@ -1152,7 +1160,9 @@ export function layoutContours(tree: WindowTree, ctx: WindowLayoutContext): Map<
   const map = new Map<string, Pt[]>();
   const frame = frameBoxOf(tree, ctx);
   const shape = tree.frameShape ?? 'rect';
-  const framePts = sampleOutline(shape, frame, { inset: 0, topRatio: tree.topRatio });
+  const framePts = tree.frameContour && tree.frameContour.length >= 3
+    ? tree.frameContour.map((p) => ({ x: frame.x + p.x, y: frame.y + p.y }))
+    : sampleOutline(shape, frame, { inset: 0, topRatio: tree.topRatio });
   // 内腔轮廓：legacy 质心内缩语义（凸形状近似等距）
   const inner = insetPolygon(framePts, tree.frameWidthMm);
 
@@ -1195,7 +1205,11 @@ export function treeHasSlopeMuntin(tree: WindowTree): boolean {
 
 /** 描述/出料层是否需要按轮廓而非矩形 box 渲染子区与中梃 */
 export function treeNeedsContours(tree: WindowTree): boolean {
-  return treeHasCurvedMuntin(tree) || treeHasSlopeMuntin(tree);
+  return (
+    (!!tree.frameContour && tree.frameContour.length >= 3) ||
+    treeHasCurvedMuntin(tree) ||
+    treeHasSlopeMuntin(tree)
+  );
 }
 
 // ── 树 → DesignModel 转换（复用既有 BOM/报价/校验链路） ──────
@@ -1218,6 +1232,11 @@ export function toDesignComponents(
   const frameId = ns('frame');
   const shape = tree.frameShape ?? 'rect';
   const contours = layoutContours(tree, { installGap: ctx.installGap });
+  // 自定义轮廓必须按外轮廓输出（旧方案迁移保真）；沿用形状采样的路径保持原口径（内腔轮廓）不变
+  const customFrameContour = tree.frameContour && tree.frameContour.length >= 3
+    ? tree.frameContour.map((p) => ({ x: p.x + layout.frame.x, y: p.y + layout.frame.y }))
+    : null;
+  const frameContour = customFrameContour ?? (shape !== 'rect' && tree.root ? contours.get(tree.root.id) : undefined);
   const frameComponent: DesignComponent = {
     id: frameId,
     kind: 'outerFrame',
@@ -1226,8 +1245,9 @@ export function toDesignComponents(
     w: Math.round(layout.frame.w),
     h: Math.round(layout.frame.h),
     shape,
+    topRatio: shape === 'trapezoid' ? tree.topRatio : undefined,
     openSides: frameOpenSidesOf(tree).length ? frameOpenSidesOf(tree) : undefined,
-    contour: shape !== 'rect' && tree.root ? contours.get(tree.root.id)?.flatMap((p) => [p.x, p.y]) : undefined,
+    contour: frameContour?.flatMap((p) => [p.x, p.y]),
     label: tree.name,
   };
   const components: DesignComponent[] = [frameComponent];
@@ -1264,6 +1284,8 @@ export function toDesignComponents(
         parentId: frameId,
         windowType: 'fixed',
         slope: isSlopeBand ? slope : undefined,
+        thicknessMm: m.thicknessMm,
+        sagittaMm: m.curve?.sagittaMm,
         contour: mc ? mc.flatMap((p) => [p.x, p.y]) : undefined,
         // 非轴对齐带的中心线长 = 闭合轮廓周长/2 − 料厚（弧带与斜带同一公式）
         arcLenMm:

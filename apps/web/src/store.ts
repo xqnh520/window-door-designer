@@ -44,7 +44,7 @@ import {
   type MuntinSlope,
 } from '@wdd/core';
 import type { LegacyShape } from './canvas/legacyShape';
-import { buildDesignModelFromLegacyShapes, normalizeLegacyShapes } from './canvas/legacyShapesImport';
+import { buildDesignModelFromLegacyShapes, normalizeLegacyShapesWithReport } from './canvas/legacyShapesImport';
 
 /** 系列出料行配置（v2）：按系列持久化的 localStorage 键 */
 const SERIES_CONFIG_LS_KEY = 'wdd-library-series-config';
@@ -547,6 +547,7 @@ export const useStore = create<DesignerStore>((set, get) => ({
   },
   importLegacyShapes: (shapes) => {
     const state = get();
+    // 已是权威装配体时绝不二次迁移（防重复迁移覆盖新数据）
     if (state.assembly) return false;
     if (!shapes.length) {
       set({
@@ -559,23 +560,10 @@ export const useStore = create<DesignerStore>((set, get) => ({
       });
       return true;
     }
-    const model = buildDesignModelFromLegacyShapes(shapes, state);
-    if (!model) return false;
-    const series = state.library.series.find((s) => s.id === model.seriesId) ?? state.library.series[0];
-    const tree = treeFromDesignModel(model, {
-      installGap: ASSEMBLY_INSTALL_GAP,
-      name: model.name,
-      seriesId: model.seriesId,
-      glassId: model.glassId,
-      frameWidthMm: series.frameWidth ?? 60,
-    });
-    if (!tree) return false;
-    try {
-      localStorage.setItem('wdd-studio-backup', JSON.stringify({ savedAt: new Date().toISOString(), shapes }));
-    } catch {
-      /* 备份失败不阻断迁移 */
-    }
-    const a = assemblyFromWindowTree(cloneTreePreserveIds(tree));
+    // 迁移前先备份原始旧数据；迁移失败时原始数据仍可人工找回
+    backupLegacyShapes('importLegacyShapes', shapes);
+    const a = assembleFromLegacyShapes(shapes, state);
+    if (!a) return false;
     set({
       ...deriveFocused(a, a.units[0].id),
       activeTemplateId: null,
@@ -600,6 +588,27 @@ export const useStore = create<DesignerStore>((set, get) => ({
       const emptyDesign = empty
         ? rebuild(empty.designType ?? 'casement', empty.openingW ?? 1500, empty.openingH ?? 1500, empty.seriesId ?? 'series-60', get().library, empty.glassId ?? 'g-5-12a-5')
         : undefined;
+      // v5 之前无 assembly：先一次性迁移旧 shapes，成功后才写入，失败保持现状（不清空）
+      let migrated: Partial<DesignerStore> | null = null;
+      if (!restored && Array.isArray(data.shapes)) {
+        const report = normalizeLegacyShapesWithReport(data.shapes);
+        backupLegacyShapes('hydrateDraft', data.shapes);
+        if (report.shapes.length) {
+          const current = get();
+          const a = assembleFromLegacyShapes(report.shapes, {
+            library: current.library,
+            design: legacyDesign ?? emptyDesign ?? current.design,
+          });
+          if (!a) {
+            console.warn('本地草稿旧画布迁移失败：已备份原始数据，未覆盖当前画布');
+            return false;
+          }
+          migrated = deriveFocused(a, a.units[0].id);
+        } else if (report.dropped > 0) {
+          console.warn(`本地草稿旧画布有 ${report.dropped} 个图形无法识别：已备份，未覆盖当前画布`);
+          return false;
+        }
+      }
       set({
         ...(legacyDesign || emptyDesign ? { design: legacyDesign ?? emptyDesign! } : {}),
         openingW: opening?.w ?? empty?.openingW ?? data.openingW ?? legacyDesign?.openingW ?? 1500,
@@ -609,12 +618,11 @@ export const useStore = create<DesignerStore>((set, get) => ({
         windowCount: data.windowCount ?? 1,
         discountRate: data.discountRate ?? 0,
         orderConfig: data.orderConfig ?? get().orderConfig,
-        ...restoredAssembly,
+        ...(migrated ?? restoredAssembly),
         activeTemplateId: null,
         canvPast: [],
         canvFuture: [],
       });
-      if (!get().assembly) get().importLegacyShapes(normalizeLegacyShapes(data.shapes));
       return true;
     } catch (err) {
       console.warn('本地草稿恢复失败:', err);
@@ -640,6 +648,27 @@ export const useStore = create<DesignerStore>((set, get) => ({
       const emptyDesign = empty
         ? rebuild(empty.designType ?? get().designType, empty.openingW ?? get().openingW, empty.openingH ?? get().openingH, empty.seriesId ?? get().seriesId, get().library, empty.glassId ?? get().design.glassId)
         : undefined;
+      // 旧格式（无 assembly）先迁移后写入；迁移失败/全部无法识别时不清空当前画布
+      let migrated: Partial<DesignerStore> | null = null;
+      if (!restored && Array.isArray(data.shapes)) {
+        const report = normalizeLegacyShapesWithReport(data.shapes);
+        backupLegacyShapes('importSchemeText', data.shapes);
+        if (report.shapes.length) {
+          const current = get();
+          const a = assembleFromLegacyShapes(report.shapes, {
+            library: current.library,
+            design: legacyDesign ?? emptyDesign ?? current.design,
+          });
+          if (!a) {
+            console.warn('方案旧画布迁移失败：已备份原始数据，未覆盖当前画布');
+            return false;
+          }
+          migrated = deriveFocused(a, a.units[0].id);
+        } else if (report.dropped > 0) {
+          console.warn(`方案旧画布有 ${report.dropped} 个图形无法识别：已备份，未覆盖当前画布`);
+          return false;
+        }
+      }
       set({
         ...(legacyDesign || emptyDesign ? { design: legacyDesign ?? emptyDesign! } : {}),
         orderConfig: data.orderConfig,
@@ -649,12 +678,11 @@ export const useStore = create<DesignerStore>((set, get) => ({
         designType: empty?.designType ?? data.designType ?? legacyDesign?.panels?.[0]?.windowType ?? get().designType,
         windowCount: data.windowCount ?? 1,
         discountRate: data.discountRate ?? 0,
-        ...restoredAssembly,
+        ...(migrated ?? restoredAssembly),
         activeTemplateId: null,
         canvPast: [],
         canvFuture: [],
       });
-      if (!get().assembly) get().importLegacyShapes(normalizeLegacyShapes(data.shapes));
       persistDraft(get());
       return true;
     } catch {
@@ -894,6 +922,42 @@ function deepCloneAssembly(a: WindowAssembly | null): WindowAssembly | null {
 
 /** 本地草稿键：手动保存与自动保存共用 */
 export const DRAFT_KEY = 'wdd-studio';
+
+/** 旧版形状迁移备份键：迁移前写入，迁移失败时原始数据仍可从 localStorage 找回 */
+export const LEGACY_BACKUP_KEY = 'wdd-studio-backup';
+
+export function backupLegacyShapes(source: string, shapes: unknown): void {
+  try {
+    localStorage.setItem(
+      LEGACY_BACKUP_KEY,
+      JSON.stringify({ savedAt: new Date().toISOString(), source, shapes }),
+    );
+  } catch {
+    /* 备份失败不阻断迁移（原始方案文件仍在用户手里） */
+  }
+}
+
+/**
+ * 旧 shapes → 单单元装配体（纯构建，不写 store）。
+ * 任何一步失败都返回 null；调用方不得据此清空现有画布（迁移失败 ≠ 用户想清空）。
+ */
+function assembleFromLegacyShapes(
+  shapes: LegacyShape[],
+  state: Pick<DesignerStore, 'library' | 'design'>,
+): WindowAssembly | null {
+  const model = buildDesignModelFromLegacyShapes(shapes, state);
+  if (!model) return null;
+  const series = state.library.series.find((s) => s.id === model.seriesId) ?? state.library.series[0];
+  const tree = treeFromDesignModel(model, {
+    installGap: ASSEMBLY_INSTALL_GAP,
+    name: model.name,
+    seriesId: model.seriesId,
+    glassId: model.glassId,
+    frameWidthMm: series.frameWidth ?? 60,
+  });
+  if (!tree) return null;
+  return assemblyFromWindowTree(cloneTreePreserveIds(tree));
+}
 
 function persistDraft(state: DesignerStore): void {
   try {

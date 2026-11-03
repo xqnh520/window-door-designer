@@ -160,10 +160,14 @@ export function describeWindowTree(tree: WindowTree, installGap: number): TreeRe
   const frameY = Math.round(layout.frame.y);
   // 外框渲染需要「外轮廓」（渲染层再内缩 frameWidth 得内腔），而非 layoutContours 里的内腔。
   // 局部化到 (frameX,frameY)，与 Group 定位一致，避免世界坐标被二次平移。
-  const frameOuterPoints =
-    shape !== 'rect'
-      ? localize(sampleOutline(shape, layout.frame, { inset: 0, topRatio: tree.topRatio }), frameX, frameY)
-      : undefined;
+  // 自定义轮廓（旧方案迁移）优先：它才是真实外轮廓，不能被形状采样覆盖。
+  const frameOuterWorld =
+    tree.frameContour && tree.frameContour.length >= 3
+      ? tree.frameContour.map((p) => ({ x: layout.frame.x + p.x, y: layout.frame.y + p.y }))
+      : shape !== 'rect'
+        ? sampleOutline(shape, layout.frame, { inset: 0, topRatio: tree.topRatio })
+        : undefined;
+  const frameOuterPoints = frameOuterWorld ? localize(frameOuterWorld, frameX, frameY) : undefined;
   const frameOuter = frameOuterPoints ? flat(frameOuterPoints) : undefined;
 
   out.push({

@@ -3,6 +3,7 @@ import type { DesignComponent, DesignModel, DesignFitting, WindowType } from '@w
 import { clipByArcBand, clipByAxis, clipByDiagonalBand, bBoxOf, insetPolygon, polygonLen, sampleOutline, type FrameShape, type MuntinSlope, type Pt } from './outline.js';
 import { resolveComponentType } from './component-registry.js';
 import type { FittingType } from './fitting-registry.js';
+import { DEFAULT_INSTALL_GAP_MM } from './defaults.js';
 
 /** 配件实例（windoorcraft 16 类配件体系）：几何归属决定挂载层级 */
 export interface WindowFitting {
@@ -946,7 +947,7 @@ export function equalDivide(
   areaId: string,
   direction: WindowMuntin['direction'],
   n: number,
-  installGap = 20,
+  installGap = DEFAULT_INSTALL_GAP_MM,
 ): boolean {
   if (!Number.isInteger(n) || n < 2 || n > 12) return false;
   const area = findArea(tree, areaId);

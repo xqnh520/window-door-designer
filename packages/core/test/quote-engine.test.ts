@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { series60, sampleLibrary } from '@wdd/schema';
+import { series60, sampleLibrary, type DesignModel } from '@wdd/schema';
 import { createDesign } from '../src/design.js';
-import { computeBom } from '../src/bom.js';
-import { defaultQuoteRuleSet, quoteFromBom, type QuoteRuleSet } from '../src/quote-engine.js';
+import { computeBom, type BomResult } from '../src/bom.js';
+import { defaultQuoteRuleSet, quoteFromBom, quoteFromDesignModel, type QuoteRuleSet } from '../src/quote-engine.js';
 
 function baseQuote(rules: Partial<QuoteRuleSet> = {}, windowCount = 1, discountRate = 0, extra?: Parameters<typeof quoteFromBom>[7]) {
   const design = createDesign('casement', { openingW: 1500, openingH: 1500, seriesId: 'series-60', name: '报价引擎' }, series60);
@@ -107,4 +107,52 @@ test('同一设计可按不同报价策略计算（成本 vs 面积）', () => {
     assert.ok(l.name.length > 0);
     assert.ok(l.detail.length > 0);
   }
+});
+
+test('DesignModel 报价与同次 BOM 共用面积口径，不回退旧 panels', () => {
+  const model: DesignModel = {
+    id: 'model-quote',
+    name: '组合窗报价',
+    openingW: 2345,
+    openingH: 1678,
+    seriesId: series60.id,
+    glassId: 'g-5-12a-5',
+    components: [
+      { id: 'frame-a', kind: 'outerFrame', x: 0, y: 0, w: 1100, h: 1638 },
+      { id: 'frame-b', kind: 'outerFrame', x: 1120, y: 0, w: 1185, h: 1638 },
+      { id: 'sash-a', kind: 'casementSash', x: 60, y: 60, w: 980, h: 1518, parentId: 'frame-a' },
+      { id: 'sash-b', kind: 'topHungSash', x: 1180, y: 60, w: 1065, h: 1518, parentId: 'frame-b' },
+    ],
+  };
+  const bom: BomResult = {
+    billedAreaM2: 7.25,
+    totalAmount: 120,
+    items: [
+      {
+        key: 'profile-test',
+        category: 'profile',
+        materialId: 'p-test',
+        code: 'P-TEST',
+        name: '测试型材',
+        spec: '1000mm',
+        unit: '支',
+        quantity: 1,
+        unitPrice: 120,
+        amount: 120,
+      },
+    ],
+  };
+
+  const quote = quoteFromDesignModel(
+    model,
+    bom,
+    { ...defaultQuoteRuleSet, sashUpcharge: 80, transportPerM2: 10 },
+    1,
+    0,
+  );
+
+  assert.equal(quote.openingAreaM2, 3.93);
+  assert.equal(quote.billedAreaM2, 7.25);
+  assert.equal(quote.lines.find((line) => line.key === 'sash-upcharge')?.quantity, 2);
+  assert.equal(quote.lines.find((line) => line.key === 'transport')?.quantity, 7.25);
 });

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { sampleLibrary, sampleWindowTemplates, series108, series60, type SeriesSpec } from '@wdd/schema';
+import { sampleLibrary, sampleWindowTemplates, series108, series60, type DesignModel, type SeriesSpec } from '@wdd/schema';
 import { computeBomFromDesignModel } from '../src/bom-design-model.js';
 import { computeCuttingList } from '../src/cutting.js';
 import { evaluateFormula, extractFormulaVariables } from '../src/formula.js';
@@ -8,6 +8,7 @@ import {
   PROFILE_ROLE_LABEL,
   WINDOW_TYPE_ROLES,
   evaluateCutCondition,
+  formulaContextFromDesignModel,
   formulaContextFromPanel,
   resolveCutFormulaRef,
   validateCutRows,
@@ -164,4 +165,38 @@ test('窗型角色元数据覆盖各窗型参与算料的型材角色', () => {
   assert.ok(WINDOW_TYPE_ROLES.fixed.includes('bead'));
   assert.ok(PROFILE_ROLE_LABEL.frame);
   assert.ok(PROFILE_ROLE_LABEL.bead);
+});
+
+test('组合窗公式按所属外框取 frameOuterW，不使用装配体总宽', () => {
+  const customSeries: SeriesSpec = {
+    ...series60,
+    cuts: [
+      { id: 'frame-h', label: '组合框横料', role: 'frame', side: ['up', 'down'], length: 'frameOuterW', count: '1', scope: 'window' },
+      { id: 'frame-v', label: '组合框竖料', role: 'frame', side: ['left', 'right'], length: 'frameOuterH', count: '1', scope: 'window' },
+    ],
+  };
+  const model: DesignModel = {
+    id: 'combined-formula',
+    name: '不同宽度组合窗',
+    openingW: 2140,
+    openingH: 1040,
+    seriesId: customSeries.id,
+    glassId: 'g-5-12a-5',
+    components: [
+      { id: 'frame-a', kind: 'outerFrame', x: 20, y: 20, w: 900, h: 1000 },
+      { id: 'glass-a', kind: 'fixedGlass', x: 80, y: 80, w: 780, h: 880, parentId: 'frame-a' },
+      { id: 'frame-b', kind: 'outerFrame', x: 920, y: 20, w: 1200, h: 1000 },
+      { id: 'glass-b', kind: 'fixedGlass', x: 980, y: 80, w: 1080, h: 880, parentId: 'frame-b' },
+    ],
+  };
+
+  const firstContext = formulaContextFromDesignModel(model, customSeries, model.components[1]);
+  const secondContext = formulaContextFromDesignModel(model, customSeries, model.components[3]);
+  assert.equal(firstContext.frameOuterW, 900);
+  assert.equal(secondContext.frameOuterW, 1200);
+
+  const bom = computeBomFromDesignModel(model, customSeries, sampleLibrary);
+  const horizontalSpecs = bom.items.filter((item) => item.name === '组合框横料').map((item) => item.spec);
+  assert.equal(horizontalSpecs.some((spec) => spec.includes('900mm')), true);
+  assert.equal(horizontalSpecs.some((spec) => spec.includes('1200mm')), true);
 });

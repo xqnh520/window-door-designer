@@ -1,14 +1,24 @@
-import { useEffect } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Divider, Form, Input, InputNumber, Select, Tabs, Tooltip, Typography, message } from 'antd';
 import { RightOutlined } from '@ant-design/icons';
 import { WindowTypeLabel, sampleWindowTemplates, type WindowType, type DesignModel } from '@wdd/schema';
-import { totalShapeSize, useStore } from '../../store';
-import { buildDesignModelFromShapes } from '../../canvas/designModelAdapter';
+import { selectCurrentGlassId, selectCurrentOpeningH, selectCurrentOpeningW, selectCurrentSeriesId, useStore } from '../../store';
+import { projectDesignModel } from '../../canvas/modelProjection';
 import { useCrmStore } from '../../crm/store';
-import { PanelEditor } from '../PanelEditor';
 import { ColorSwatches } from './ColorSwatches';
 import { colorHex } from './palette';
-import { computeBomFromDesignModel, isTemplateCompatible, validateDesignModel, type ValidationIssue } from '@wdd/core';
+import {
+  DEFAULT_INSTALL_GAP_MM,
+  computeBomFromDesignModel,
+  findArea,
+  findMuntin,
+  isTemplateCompatible,
+  layoutAssembly,
+  layoutTree,
+  validateDesignModel,
+  type ValidationIssue,
+  type WindowTree,
+} from '@wdd/core';
 
 const PACKAGING_OPTIONS = ['木架', '纸箱包装', '泡沫+木架', '裸装(定制)'];
 const HINGE_OPTIONS = ['不锈钢合页', '锌合金合页', '隐形合页', '国产合页'];
@@ -34,24 +44,29 @@ export function StudioRightPanel({
   onFocusShape,
   focusShapeId,
   externalModel,
+  tree,
+  onResizeDim,
 }: {
   onCollapse: () => void;
   onFocusShape?: (id: string) => void;
   focusShapeId?: string | null;
   /** 容器树编辑模式：由树实时生成的 DesignModel（优先于画布形状推断） */
   externalModel?: DesignModel | null;
+  /** 聚焦单元的权威容器树：尺寸块唯一几何来源 */
+  tree?: WindowTree | null;
+  /** 键入尺寸：交给画布 applyDimEdit（与点击标注同一 resize-dim 通路） */
+  onResizeDim?: (markId: string, value: number) => void;
 }) {
   const library = useStore((s) => s.library);
-  const design = useStore((s) => s.design);
   const designType = useStore((s) => s.designType);
-  const seriesId = useStore((s) => s.seriesId);
+  const seriesId = useStore(selectCurrentSeriesId);
+  const glassId = useStore(selectCurrentGlassId);
+  const openingW = useStore(selectCurrentOpeningW);
+  const openingH = useStore(selectCurrentOpeningH);
   const activeTemplateId = useStore((s) => s.activeTemplateId);
-  const shapes = useStore((s) => s.shapes);
+  const assembly = useStore((s) => s.assembly);
   const windowCount = useStore((s) => s.windowCount);
   const orderConfig = useStore((s) => s.orderConfig);
-  
-  // ★ 新增：读取画布同步过来的选中图形尺寸信息
-  const selectedMetrics = useStore((s) => s.selectedMetrics);
 
   const setWindowType = useStore((s) => s.setWindowType);
   const setSeries = useStore((s) => s.setSeries);
@@ -70,10 +85,8 @@ export function StudioRightPanel({
     }
   }, []);
 
-  // 尺寸：画布全部图形的整体包围盒（实测值，作为兜底展示）
-  const shapeTotal = totalShapeSize(shapes);
   // 容器树编辑模式优先使用树模型；否则由画布形状推断
-  const designModel = externalModel ?? buildDesignModelFromShapes(shapes, useStore.getState());
+  const designModel = externalModel ?? projectDesignModel(useStore.getState());
   const activeSeries = library.series.find((s) => s.id === seriesId) ?? library.series[0];
   const activeTemplate = sampleWindowTemplates.find((t) => t.id === activeTemplateId) ?? null;
   const validationIssues = validateDesignModel(designModel, activeSeries, activeTemplate, library);
@@ -112,11 +125,46 @@ export function StudioRightPanel({
     }))
     .filter((g) => g.options.length > 0);
 
-  // ★ 核心逻辑：优先显示选中图形的尺寸，未选中时显示全局总尺寸
-  const displayWidth = selectedMetrics ? selectedMetrics.width : shapeTotal.w;
-  const displayHeight = selectedMetrics ? selectedMetrics.height : shapeTotal.h;
-  const isGroupSelected = selectedMetrics?.isGroup ?? false;
-  const hasSelection = selectedMetrics !== null;
+  // 尺寸块单源自权威容器树：与画布标注 applyDimEdit/dimValue 共用 markId 与换算口径
+  const sizeTarget = useMemo<{ markBase: string; prefix: string; label: string; hint: string } | null>(() => {
+    if (!tree) return null;
+    if (!focusShapeId || focusShapeId === 'frame') {
+      return { markBase: 'frame', prefix: '洞口', label: '本单元洞口尺寸 (mm)', hint: '洞口 = 净安装尺寸，不含安装缝。改这里会整樘等比缩放。' };
+    }
+    const area = findArea(tree, focusShapeId);
+    if (area) return { markBase: area.id, prefix: '分格', label: '选中分格尺寸 (mm)', hint: '优先把余量推给相邻分格，整窗轮廓不变；该方向没有相邻分格时按整窗洞口调整。' };
+    const found = findMuntin(tree, focusShapeId);
+    if (found) return { markBase: found.area.id, prefix: '宿主分格', label: '中梃宿主分格尺寸 (mm)', hint: '选中的是中梃：这里改宿主分格，中梃位置请拖拽或点标注。' };
+    return { markBase: 'frame', prefix: '洞口', label: '本单元洞口尺寸 (mm)', hint: '洞口 = 净安装尺寸，不含安装缝。' };
+  }, [tree, focusShapeId]);
+
+  /** 目标当前实测宽高（mm）：外框走 layout.frame，分格走 layout.boxes */
+  const sizeValue = useMemo<{ w: number; h: number } | null>(() => {
+    if (!tree || !sizeTarget) return null;
+    const layout = layoutTree(tree, { installGap: DEFAULT_INSTALL_GAP_MM });
+    if (sizeTarget.markBase === 'frame') return { w: Math.round(layout.frame.w), h: Math.round(layout.frame.h) };
+    const box = layout.boxes.get(sizeTarget.markBase);
+    return box ? { w: Math.round(box.w), h: Math.round(box.h) } : null;
+  }, [tree, sizeTarget]);
+
+  // 键入草稿：只在回车/失焦时提交，避免每敲一个字符就重算出料与报价
+  const [sizeDraft, setSizeDraft] = useState<{ w: number | null; h: number | null } | null>(null);
+  const shownW = sizeDraft?.w ?? sizeValue?.w ?? null;
+  const shownH = sizeDraft?.h ?? sizeValue?.h ?? null;
+
+  const commitSize = (axis: 'w' | 'h') => {
+    if (!sizeTarget || !onResizeDim) return;
+    const v = axis === 'w' ? sizeDraft?.w : sizeDraft?.h;
+    setSizeDraft(null);
+    if (v == null || !Number.isFinite(v)) return;
+    const cur = axis === 'w' ? sizeValue?.w : sizeValue?.h;
+    if (cur != null && Math.round(v) === cur) return;
+    onResizeDim(`${sizeTarget.markBase}-${axis}`, v);
+  };
+
+  // 多单元（外框拼接）时给出整樘组合外接尺寸，只读
+  const assemblyBounds = assembly ? layoutAssembly(assembly, { installGap: DEFAULT_INSTALL_GAP_MM }).bbox : null;
+  const unitCount = assembly?.units.length ?? 0;
 
   const formItem = { style: { marginBottom: 10 } };
 
@@ -211,23 +259,54 @@ export function StudioRightPanel({
       </Form.Item>
 
       <Divider style={{ margin: '10px 0' }} plain>
-        {hasSelection ? (isGroupSelected ? '组合尺寸 (实测)' : '选中图形尺寸 (实测)') : '全局总尺寸 (实测)'}
+        {sizeTarget ? sizeTarget.label : '全局总尺寸 (实测)'}
       </Divider>
-      
-      <Form.Item label="总宽 (mm)" {...formItem}>
-        <InputNumber disabled value={displayWidth} style={{ width: '100%' }} />
+
+      <Form.Item label={sizeTarget ? `${sizeTarget.prefix}宽 (mm)` : '总宽 (mm)'} {...formItem}>
+        {sizeTarget && onResizeDim ? (
+          <InputNumber
+            min={60}
+            step={10}
+            precision={0}
+            value={shownW}
+            disabled={!sizeValue}
+            onChange={(v) => setSizeDraft((d) => ({ w: v ?? null, h: d?.h ?? null }))}
+            onPressEnter={() => commitSize('w')}
+            onBlur={() => commitSize('w')}
+            style={{ width: '100%' }}
+          />
+        ) : (
+          <InputNumber disabled value={Math.round(assemblyBounds?.w ?? openingW)} style={{ width: '100%' }} />
+        )}
       </Form.Item>
-      <Form.Item label="总高 (mm)" {...formItem}>
-        <InputNumber disabled value={displayHeight} style={{ width: '100%' }} />
+      <Form.Item label={sizeTarget ? `${sizeTarget.prefix}高 (mm)` : '总高 (mm)'} {...formItem}>
+        {sizeTarget && onResizeDim ? (
+          <InputNumber
+            min={60}
+            step={10}
+            precision={0}
+            value={shownH}
+            disabled={!sizeValue}
+            onChange={(v) => setSizeDraft((d) => ({ w: d?.w ?? null, h: v ?? null }))}
+            onPressEnter={() => commitSize('h')}
+            onBlur={() => commitSize('h')}
+            style={{ width: '100%' }}
+          />
+        ) : (
+          <InputNumber disabled value={Math.round(assemblyBounds?.h ?? openingH)} style={{ width: '100%' }} />
+        )}
       </Form.Item>
       
       <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>
-        {hasSelection 
-          ? (isGroupSelected 
-              ? '由当前选中组合的整体包围盒自动计算，禁止编辑。' 
-              : '由当前选中单个图形的包围盒自动计算，禁止编辑。')
-          : '由画布所有图形的整体包围盒自动计算，禁止编辑。'}
+        {sizeTarget
+          ? sizeTarget.hint
+          : '画布还没有外框：先点左侧「外框」拖出一个矩形，之后这里可直接键入尺寸。'}
       </Typography.Text>
+      {unitCount > 1 && assemblyBounds ? (
+        <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 6 }}>
+          整樘组合外接 {Math.round(assemblyBounds.w)}×{Math.round(assemblyBounds.h)} mm（{unitCount} 单元，只读）
+        </Typography.Text>
+      ) : null}
 
       {componentStats && (
         <div style={{ border: '1px solid #e8e8e8', borderRadius: 6, padding: '8px 10px', margin: '8px 0 10px', background: '#fafafa' }}>
@@ -288,7 +367,7 @@ export function StudioRightPanel({
         <Select value={orderConfig.packaging} onChange={(v) => setOrderConfig({ packaging: v })} options={PACKAGING_OPTIONS.map((p) => ({ value: p, label: p }))} />
       </Form.Item>
       <Form.Item label="玻璃" {...formItem}>
-        <Select value={design.glassId} onChange={setGlass} options={library.glass.map((g) => ({ value: g.id, label: g.name }))} />
+        <Select value={glassId} onChange={setGlass} options={library.glass.map((g) => ({ value: g.id, label: g.name }))} />
       </Form.Item>
       <Form.Item label="合页" {...formItem}>
         <Select value={orderConfig.hinge} onChange={(v) => setOrderConfig({ hinge: v })} options={HINGE_OPTIONS.map((h) => ({ value: h, label: h }))} />
@@ -301,6 +380,16 @@ export function StudioRightPanel({
       </Form.Item>
       <Form.Item label="墙厚 (mm)" {...formItem}>
         <InputNumber min={80} max={600} step={10} value={orderConfig.wallThickness} style={{ width: '100%' }} onChange={(v) => setOrderConfig({ wallThickness: v ?? 200 })} />
+      </Form.Item>
+      <Form.Item label="压线拼接" {...formItem}>
+        <Select
+          value={orderConfig.beadJoint}
+          onChange={(v) => setOrderConfig({ beadJoint: v })}
+          options={[
+            { value: 'miter', label: '斜连接（四角 45°）' },
+            { value: 'butt', label: '直连接（直边搭接）' },
+          ]}
+        />
       </Form.Item>
     </Form>
   );
@@ -372,8 +461,6 @@ export function StudioRightPanel({
             { key: 'color', label: '颜色', children: colorTab },
           ]}
         />
-        <Divider style={{ margin: '12px 0' }} />
-        <PanelEditor />
       </div>
     </div>
   );

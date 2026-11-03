@@ -2,12 +2,12 @@ import { useEffect, useMemo, useRef } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
-import type { SketchShape } from '../store';
-import { useStore } from '../store';
+import { focusedTreeFromAssembly, selectCurrentSeriesId, useStore } from '../store';
 import { colorHex } from './studio/palette';
 import { sampleOutline } from '../canvas/model';
 import { arcChainOf, arcFromChord, insetPolygon, polygonArea, sashWidthOf } from '@wdd/core';
-import { treeToShapes, assemblyToShapes, assemblySize } from '../canvas/windowTreeBridge';
+import { assemblyToShapes, assemblySize } from '../canvas/shapes3d';
+import type { LegacyShape } from '../canvas/legacyShape';
 
 type Pt2 = { x: number; y: number };
 
@@ -15,7 +15,7 @@ type Pt2 = { x: number; y: number };
  * 挤出用轮廓：有子区真实轮廓（异形框叶 / 弧梃切出的月牙边）时一律按它等距内缩，
  * 内缩退化就折半重试直至退回原轮廓（绝不回退成 bbox，否则又会露出直边）；无轮廓才按 bbox/形状算。
  */
-function outlineOf(s: SketchShape, inset: number): Pt2[] {
+function outlineOf(s: LegacyShape, inset: number): Pt2[] {
   const c = s.contour;
   if (!c || c.length < 3) return sampleOutline(s, inset);
   let off = inset;
@@ -29,24 +29,25 @@ function outlineOf(s: SketchShape, inset: number): Pt2[] {
 
 export function Preview3D() {
   const containerRef = useRef<HTMLDivElement>(null);
-  const design = useStore((s) => s.design);
-  const shapes = useStore((s) => s.shapes);
-  const windowTree = useStore((s) => s.windowTree);
   const assembly = useStore((s) => s.assembly);
+  const focusedUnitId = useStore((s) => s.focusedUnitId);
+  const windowTree = useMemo(
+    () => focusedTreeFromAssembly(assembly, focusedUnitId),
+    [assembly, focusedUnitId],
+  );
   const outerColor = useStore((s) => s.orderConfig.outerColor);
   const innerColor = useStore((s) => s.orderConfig.innerColor);
   const meshSizeConfig = useStore((s) => s.orderConfig.screenMeshSize);
   const meshColorConfig = useStore((s) => s.orderConfig.screenMeshColor);
   const beadStyle = useStore((s) => ((s.orderConfig as any).beadStyle as 'square' | 'sloped') ?? 'square'); // 目前仅 square（斜压线 sloped 为预留）
-  const series = useStore((s) => s.library.series.find((x) => x.id === s.design.seriesId) ?? s.library.series[0]);
+  const seriesId = useStore(selectCurrentSeriesId);
+  const series = useStore((s) => s.library.series.find((x) => x.id === seriesId) ?? s.library.series[0]);
 
-  // 容器树设计模式：树为权威数据 → 桥接为图形（外框/中梃/构件），复用 3D 挤出管线
-  // 外框拼接：多单元装配时桥接整体（全部窗框 + 拼樘料）
-  const effectiveShapes = useMemo<SketchShape[]>(() => {
-    if (assembly && assembly.units.length > 1) return assemblyToShapes(assembly, series);
-    if (windowTree) return treeToShapes(windowTree, series);
-    return shapes;
-  }, [assembly, windowTree, shapes, series]);
+  // 3D 只消费 WindowAssembly 的单向投影；兼容图形不进入运行时 store。
+  const effectiveShapes = useMemo<LegacyShape[]>(
+    () => (assembly ? assemblyToShapes(assembly, series) : []),
+    [assembly, series],
+  );
 
   useEffect(() => {
     const container = containerRef.current;
@@ -75,8 +76,8 @@ export function Preview3D() {
     scene.environment = envRT.texture;
 
     const multi = assembly && assembly.units.length > 1 ? assemblySize(assembly) : null;
-    const drawW = Math.max(design.openingW + 600, windowTree ? windowTree.openingW + 600 : 0, multi ? multi.w + 600 : 0, 3200);
-    const drawH = Math.max(design.openingH + 600, windowTree ? windowTree.openingH + 600 : 0, multi ? multi.h + 600 : 0, 2200);
+    const drawW = Math.max(windowTree ? windowTree.openingW + 600 : 0, multi ? multi.w + 600 : 0, 3200);
+    const drawH = Math.max(windowTree ? windowTree.openingH + 600 : 0, multi ? multi.h + 600 : 0, 2200);
     const S = Math.max(2.0, drawW / 1000, drawH / 1000);
 
     const camera = new THREE.PerspectiveCamera(40, width / height, 0.01, 1000);
@@ -565,9 +566,7 @@ parts.forEach((part) => {
         container.removeChild(renderer.domElement);
       }
     };
-  }, [design, assembly, effectiveShapes, windowTree, series, outerColor, innerColor, beadStyle, meshSizeConfig, meshColorConfig]);
+  }, [assembly, effectiveShapes, windowTree, series, outerColor, innerColor, beadStyle, meshSizeConfig, meshColorConfig]);
 
   return <div ref={containerRef} style={{ width: '100%', height: '100%', minHeight: 480 }} />;
 }
-
-export type { SketchShape };

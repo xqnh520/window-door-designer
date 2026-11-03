@@ -1,19 +1,17 @@
 import type { SeriesSpec } from '@wdd/schema';
 import type { WindowTree, WindowAssembly, Pt, TreeRenderElement } from '@wdd/core';
-import { describeWindowTree, treeFromDesignModel, layoutAssembly, meetingWidthOf, sashLeavesOf, sashLeafRects } from '@wdd/core';
-import type { DesignerStore, SketchShape } from '../store';
-import { buildDesignModelFromShapes } from './designModelAdapter';
+import { DEFAULT_INSTALL_GAP_MM, describeWindowTree, layoutAssembly, meetingWidthOf, sashLeavesOf, sashLeafRects } from '@wdd/core';
+import type { LegacyShape } from './legacyShape';
 
 /**
- * 容器树 ↔ 传统画布图形 桥接（R4）：
- * - treeToShapes：树 → SketchShape[]（保存/CRM export 兼容旧格式）
- * - shapesToTree：旧画布图形 → 容器树（一键进入树设计模式）
+ * 容器树到旧 shapes 的单向边界投影。
+ *
+ * 只供 3D 与 CRM 兼容输出消费；返回值不是业务状态，禁止写回 store。
  */
+const INSTALL_GAP = DEFAULT_INSTALL_GAP_MM;
 
-const INSTALL_GAP = 20;
-
-export function treeToShapes(tree: WindowTree, _series: SeriesSpec): SketchShape[] {
-  const shapes: SketchShape[] = [];
+export function treeToShapes(tree: WindowTree, _series: SeriesSpec): LegacyShape[] {
+  const shapes: LegacyShape[] = [];
   let seq = 0;
 
   for (const el of describeWindowTree(tree, INSTALL_GAP)) {
@@ -22,7 +20,7 @@ export function treeToShapes(tree: WindowTree, _series: SeriesSpec): SketchShape
       const shapeType = el.shape && el.shape !== 'rect' ? el.shape : 'rect';
       shapes.push({
         id: `sh-frame-${++seq}`,
-        type: shapeType as SketchShape['type'],
+        type: shapeType as LegacyShape['type'],
         bbox,
         topRatio: String(shapeType).startsWith('trapezoid') ? (tree.topRatio ?? 0.6) : 1,
         text: '',
@@ -33,7 +31,6 @@ export function treeToShapes(tree: WindowTree, _series: SeriesSpec): SketchShape
       continue;
     }
     if (el.kind === 'muntin') {
-      // 中梃：按竖/横生成端点（3D 长条方向与 2D 一致）；斜梃取 bbox 对角两端
       const vertical = el.h >= el.w;
       const ends: [{ x: number; y: number }, { x: number; y: number }] = el.slope
         ? el.slope === 'diagonal'
@@ -58,7 +55,7 @@ export function treeToShapes(tree: WindowTree, _series: SeriesSpec): SketchShape
       });
       continue;
     }
-    // 叶子：有构件才输出
+
     const sash = el.sash;
     if (!sash) continue;
     const contour = absoluteContour(el);
@@ -66,7 +63,6 @@ export function treeToShapes(tree: WindowTree, _series: SeriesSpec): SketchShape
       ? sashLeafRects(el.w, el.h, 2, meetingWidthOf(tree))
       : [];
     if (leaves.length === 2) {
-      // 对开扇：两片扇各出一个构件（中缝两根对开料重叠一段，3D 里就是两圈扇料）
       leaves.forEach((leaf, i) => {
         shapes.push({
           id: `sh-panel-${++seq}`,
@@ -102,26 +98,8 @@ export function treeToShapes(tree: WindowTree, _series: SeriesSpec): SketchShape
   return shapes;
 }
 
-/** 旧画布图形 → 容器树；无法识别外框时返回 null */
-export function shapesToTree(shapes: SketchShape[], state: DesignerStore): WindowTree | null {
-  const model = buildDesignModelFromShapes(shapes, state);
-  if (!model) return null;
-  const series = state.library.series.find((s) => s.id === model.seriesId) ?? state.library.series[0];
-  return treeFromDesignModel(model, {
-    installGap: INSTALL_GAP,
-    name: model.name,
-    seriesId: model.seriesId,
-    glassId: model.glassId,
-    frameWidthMm: series.frameWidth ?? 60,
-  });
-}
-
-/**
- * 装配体 → 传统画布图形（外框拼接：供 3D 挤出管线与 CRM 方案保存复用旧格式）。
- * 逐单元烘焙绝对布局 → treeToShapes，重编 id 防冲突；拼樘料按布局矩形输出为中线直条（mullion 语义）。
- */
-export function assemblyToShapes(a: WindowAssembly, series: SeriesSpec): SketchShape[] {
-  const out: SketchShape[] = [];
+export function assemblyToShapes(a: WindowAssembly, series: SeriesSpec): LegacyShape[] {
+  const out: LegacyShape[] = [];
   const layout = layoutAssembly(a, { installGap: INSTALL_GAP });
   for (const u of a.units) {
     const baked = layout.trees.get(u.id);
@@ -148,13 +126,11 @@ export function assemblyToShapes(a: WindowAssembly, series: SeriesSpec): SketchS
   return out;
 }
 
-/** 装配体总体尺寸（mm，四舍五入）：用于 3D 场景包围 */
 export function assemblySize(a: WindowAssembly): { w: number; h: number } {
   const bb = layoutAssembly(a, { installGap: INSTALL_GAP }).bbox;
   return { w: Math.round(bb.x + bb.w + INSTALL_GAP), h: Math.round(bb.y + bb.h + INSTALL_GAP) };
 }
 
-/** 描述里的「局部扁平点序」→ 绝对坐标轮廓（少于 3 点视为无轮廓，走原 bbox 路径） */
 function absoluteContour(el: TreeRenderElement): Pt[] | undefined {
   const flat = el.points;
   if (!flat || flat.length < 6) return undefined;
@@ -185,9 +161,7 @@ function roleOf(type: string): string {
     case 'casement':
     case 'casementUp':
     case 'tiltSlide':
-      return 'sash';
     case 'sliding':
-      return 'sash';
     case 'topHinged':
       return 'sash';
     case 'screen':

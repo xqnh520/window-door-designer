@@ -1,8 +1,8 @@
 import Konva from 'konva';
 import { renderWindowTree, drawFittingBadge, type WindowTreeRenderOptions } from './window-tree-render.js';
-import { layoutAssembly, type WindowAssembly } from './window-assembly.js';
-import { rotateDeg, type UnitPlacement, type Vec2 } from './window-assembly-corner.js';
-import type { WindowBox } from './window-tree.js';
+import { layoutAssembly, type WindowAssembly } from '@wdd/core';
+import { rotateDeg, type UnitPlacement, type Vec2 } from '@wdd/core';
+import type { WindowBox } from '@wdd/core';
 
 /**
  * 装配体 → Konva 物化（浏览器画布）：逐单元复用 renderWindowTree（绝对坐标 = 布局烘焙的 offset），

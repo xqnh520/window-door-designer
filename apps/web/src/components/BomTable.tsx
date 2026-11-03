@@ -1,10 +1,10 @@
 import { useMemo, useState } from 'react';
-import { Button, Space, Table, Tag, Typography } from 'antd';
-import { bomToCsv, computeBom, computeBomFromDesignModel } from '@wdd/core';
+import { Button, Empty, Space, Table, Tag, Typography } from 'antd';
+import { bomToCsv, computeBomFromDesignModel } from '@wdd/core';
 import type { DesignModel } from '@wdd/schema';
-import { useStore } from '../store';
+import { selectCurrentDesignName, selectCurrentSeriesId, useStore } from '../store';
 import { downloadText } from '../util/download';
-import { buildDesignModelFromShapes } from '../canvas/designModelAdapter';
+import { projectAssembly } from '../canvas/modelProjection';
 import { BatchPickModal } from '../warehouse/BatchPickModal';
 
 const CATEGORY_LABEL: Record<string, string> = {
@@ -23,16 +23,18 @@ const CATEGORY_COLOR: Record<string, string> = {
 
 export function BomTable({ modelOverride }: { modelOverride?: DesignModel | null }) {
   const [pickOpen, setPickOpen] = useState(false);
-  const design = useStore((s) => s.design);
+  const designName = useStore(selectCurrentDesignName);
+  const seriesId = useStore(selectCurrentSeriesId);
   const library = useStore((s) => s.library);
-  const shapes = useStore((s) => s.shapes);
-  const series = library.series.find((s) => s.id === design.seriesId) ?? library.series[0];
-  const state = useStore.getState();
+  const assembly = useStore((s) => s.assembly);
+  const series = library.series.find((s) => s.id === seriesId) ?? library.series[0];
 
   const bom = useMemo(() => {
-    const model = modelOverride ?? buildDesignModelFromShapes(shapes, state);
-    return model ? computeBomFromDesignModel(model, series, library) : computeBom(design, series, library);
-  }, [design, series, library, shapes, state, modelOverride]);
+    const model = modelOverride !== undefined ? modelOverride : projectAssembly(assembly);
+    return model ? computeBomFromDesignModel(model, series, library) : null;
+  }, [series, library, assembly, modelOverride]);
+
+  if (!bom) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="画布为空，暂无材料清单" />;
 
   const dataSource = bom.items.map((item, i) => ({ ...item, index: i + 1 }));
 
@@ -54,7 +56,7 @@ export function BomTable({ modelOverride }: { modelOverride?: DesignModel | null
   ];
 
   const exportBom = () => {
-    downloadText(`${design.name}-材料清单.csv`, bomToCsv(bom, `${design.name} 门窗材料清单`));
+    downloadText(`${designName}-材料清单.csv`, bomToCsv(bom, `${designName} 门窗材料清单`));
   };
 
   return (
@@ -88,7 +90,7 @@ export function BomTable({ modelOverride }: { modelOverride?: DesignModel | null
       <BatchPickModal
         open={pickOpen}
         bomItems={bom.items}
-        designName={design.name}
+        designName={designName}
         onCancel={() => setPickOpen(false)}
         onDone={() => setPickOpen(false)}
       />

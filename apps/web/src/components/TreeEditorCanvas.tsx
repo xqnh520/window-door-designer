@@ -1,15 +1,19 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type Ref } from 'react';
-import { Button, InputNumber, Typography } from 'antd';
+import { Button, Divider, InputNumber, Tooltip, Typography } from 'antd';
 import type { WindowTree, WindowAssembly, MuntinSlope } from '@wdd/core';
 import { findArea } from '@wdd/core';
 import { TreeEditorController, type TreeEditorColors, type TreeEditorTool } from '../canvas/tree-editor';
-import { useStore } from '../store';
+import { useStore, type CanvasAction } from '../store';
 import { colorHex, mixHex } from './studio/palette';
+
+/** 与 tree-editor 的 clampScale 一致：仅用于按钮禁用态，真实限幅始终在控制器侧 */
+const MIN_ZOOM = 0.2;
+const MAX_ZOOM = 4;
 
 /**
  * 容器树编辑画布（R5 统一画布）：
  * - 工具由外部（左侧工具栏）控制：select / split / framing / place
- * - 树为权威数据：onChange 上抛变更，父级 setState 后回灌 setTree 重渲染
+ * - WindowAssembly 为权威数据：画布只上抛 CanvasAction，父级更新后回灌只读树投影
  * - onPlaceRequest：place 模式点击分格时触发，由父级直接放置左侧分类菜单选中的构件
  * - onFrameCreate：framing 拖出外框矩形后由父级（重建窗口）
  */
@@ -27,6 +31,19 @@ export interface TreeEditorCanvasHandle {
   deleteSelected: () => void;
   /** 分割方向：null=按拖拽主导轴自动（横/竖梃）；非空=斜梃模式（对角线族） */
   setSplitSlope: (slope: MuntinSlope | null) => void;
+  /** 键入尺寸：与点击标注走同一条 resize-dim 通路（markId='frame-w'|'frame-h'|'{areaId}-w|-h'） */
+  applyDimEdit: (markId: string, value: number) => void;
+  /** 标注当前值（mm）；与写入侧同一份换算，避免两处口径漂移 */
+  dimValue: (markId: string) => number | null;
+  /** 适应窗口：整幅窗型回到视口，缩放倍率复位 */
+  fitView: () => void;
+  /** 围绕视口中心缩放（限幅） */
+  zoomBy: (factor: number) => void;
+  /** 设定缩放倍率（限幅） */
+  zoomTo: (scale: number) => void;
+  getScale: () => number;
+  /** 由外部（校验列表）选中构件：高亮 + 标注 */
+  revealNode: (id: string | null) => void;
 }
 
 function TreeEditorCanvasImpl(
@@ -36,7 +53,7 @@ function TreeEditorCanvasImpl(
     focusedUnitId,
     selectedCombinerId,
     tool,
-    onChange,
+    onAction,
     onPlaceRequest,
     onFrameCreate,
     onSelectUnit,
@@ -48,7 +65,7 @@ function TreeEditorCanvasImpl(
     focusedUnitId?: string | null;
     selectedCombinerId?: string | null;
     tool: TreeCanvasTool;
-    onChange: (t: WindowTree) => void;
+    onAction: (action: CanvasAction) => void;
     onPlaceRequest?: (areaId: string) => void;
     onFrameCreate?: (x: number, y: number, w: number, h: number) => void;
     onSelectUnit?: (unitId: string) => void;
@@ -62,10 +79,13 @@ function TreeEditorCanvasImpl(
   const [selectedInfo, setSelectedInfo] = useState<string | null>(null);
   const [dimEdit, setDimEdit] = useState<string | null>(null);
   const [dimVal, setDimVal] = useState<number | null>(null);
+  const [zoom, setZoom] = useState(1);
+  /** 光标坐标读数走 DOM 直写：mousemove 频率高，不应当成 React state 反复重渲染 */
+  const cursorRef = useRef<HTMLSpanElement | null>(null);
 
   // 回调 refs：避免初始化闭包过期
-  const onChangeRef = useRef(onChange);
-  onChangeRef.current = onChange;
+  const onActionRef = useRef(onAction);
+  onActionRef.current = onAction;
   const onPlaceRef = useRef(onPlaceRequest);
   onPlaceRef.current = onPlaceRequest;
   const onFrameRef = useRef(onFrameCreate);
@@ -88,7 +108,7 @@ function TreeEditorCanvasImpl(
       el,
       initialTree,
       {
-        onChange: (t) => onChangeRef.current(t),
+        onAction: (action) => onActionRef.current(action),
         onSelect: (id) => {
           onSelectRef.current?.(id);
           setSelectedInfo(describeSelected(treeRef.current, id));
@@ -103,12 +123,20 @@ function TreeEditorCanvasImpl(
           setDimEdit(markId);
           setDimVal(c.dimValue(markId));
         },
+        onViewChange: (scale) => setZoom(scale),
+        onPointerMove: (p) => {
+          const el = cursorRef.current;
+          if (el) el.textContent = p ? `X ${Math.round(p.x)} · Y ${Math.round(p.y)} mm` : '';
+        },
       },
       initialTree ? initialTree.openingW + 200 : 1400,
       initialTree ? initialTree.openingH + 200 : 1200,
     );
     ctlRef.current = ctl;
     ctl.setTool(toolRef.current);
+    // 无头 QA 入口：内置浏览器截图不可用，只能靠脚本驱动控制器断言视图/命中。
+    // 生产构建下 import.meta.env.DEV 为常量 false，整段被摇掉。
+    if (import.meta.env.DEV) (window as unknown as { __wddTreeCtl?: TreeEditorController }).__wddTreeCtl = ctl;
 
     const ro = new ResizeObserver(() => {
       ctl.resize(el.clientWidth, el.clientHeight);
@@ -120,6 +148,7 @@ function TreeEditorCanvasImpl(
       ctl.destroy();
       el.innerHTML = '';
       ctlRef.current = null;
+      if (import.meta.env.DEV) (window as unknown as { __wddTreeCtl?: TreeEditorController }).__wddTreeCtl = undefined;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -147,6 +176,10 @@ function TreeEditorCanvasImpl(
 
   const outerColor = useStore((s) => s.orderConfig.outerColor);
   const innerColor = useStore((s) => s.orderConfig.innerColor);
+  const beadJoint = useStore((s) => s.orderConfig.beadJoint);
+  const beadWidth = useStore(
+    (s) => (s.library.series.find((x) => x.id === s.seriesId) ?? s.library.series[0])?.beadWidth,
+  );
   useEffect(() => {
     const ctl = ctlRef.current;
     if (!ctl) return;
@@ -161,13 +194,22 @@ function TreeEditorCanvasImpl(
       inner: mixHex(profile, white, 0.9),
       panel: mixHex(profile, white, 0.96),
       screen: '#e9ebee',
+      bead: mixHex(profile, white, 0.34), // 压线：外框掺白得到的差异化浅银，扣边可辨
     } satisfies TreeEditorColors);
-  }, [outerColor, innerColor]);
+    ctl.setBeadConfig({ widthMm: beadWidth, joint: beadJoint });
+  }, [outerColor, innerColor, beadWidth, beadJoint]);
 
   useImperativeHandle(ref, () => ({
     exportImage: () => ctlRef.current?.exportImage() ?? null,
     deleteSelected: () => ctlRef.current?.deleteSelected(),
     setSplitSlope: (slope) => ctlRef.current?.setSplitSlope(slope ?? null),
+    applyDimEdit: (markId, value) => ctlRef.current?.applyDimEdit(markId, value),
+    dimValue: (markId) => ctlRef.current?.dimValue(markId) ?? null,
+    fitView: () => ctlRef.current?.fitView(),
+    zoomBy: (factor) => ctlRef.current?.zoomBy(factor),
+    zoomTo: (scale) => ctlRef.current?.setScale(scale),
+    getScale: () => ctlRef.current?.getScale() ?? 1,
+    revealNode: (id) => ctlRef.current?.revealNode(id),
   }));
 
   const commitDim = () => {
@@ -203,6 +245,49 @@ function TreeEditorCanvasImpl(
           {selectedInfo}
         </div>
       )}
+      {/* 视图条：光标读数 + 缩放控件（右下角常驻） */}
+      <div
+        style={{
+          position: 'absolute',
+          right: 12,
+          bottom: 12,
+          zIndex: 10,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          background: '#fff',
+          border: '1px solid #d9d9d9',
+          borderRadius: 6,
+          padding: '3px 8px',
+          boxShadow: '0 2px 6px rgba(0,0,0,0.1)',
+          fontSize: 12,
+          color: '#555',
+        }}
+      >
+        <span ref={cursorRef} style={{ minWidth: 118, color: '#8c8c8c' }} />
+        <Divider type="vertical" style={{ margin: '0 2px', height: 14 }} />
+        <Tooltip title="缩小">
+          <Button size="small" type="text" disabled={zoom <= MIN_ZOOM + 1e-6} onClick={() => ctlRef.current?.zoomBy(1 / 1.25)}>
+            −
+          </Button>
+        </Tooltip>
+        <span style={{ minWidth: 42, textAlign: 'center', color: '#555' }}>{Math.round(zoom * 100)}%</span>
+        <Tooltip title="放大">
+          <Button size="small" type="text" disabled={zoom >= MAX_ZOOM - 1e-6} onClick={() => ctlRef.current?.zoomBy(1.25)}>
+            +
+          </Button>
+        </Tooltip>
+        <Tooltip title="1:1（1 屏幕像素 = 1 mm）">
+          <Button size="small" type="text" onClick={() => ctlRef.current?.setScale(1)}>
+            1:1
+          </Button>
+        </Tooltip>
+        <Tooltip title="适应窗口（整樘窗回到视口）">
+          <Button size="small" type="text" onClick={() => ctlRef.current?.fitView()}>
+            适应
+          </Button>
+        </Tooltip>
+      </div>
       {/* 尺寸标注编辑浮层 */}
       {dimEdit && (
         <div
@@ -225,7 +310,18 @@ function TreeEditorCanvasImpl(
           <Typography.Text strong style={{ fontSize: 12 }}>
             设置尺寸（mm）
           </Typography.Text>
-          <InputNumber size="small" autoFocus value={dimVal} min={60} onChange={(v) => setDimVal(v ?? null)} style={{ width: 110 }} />
+          <InputNumber
+            size="small"
+            autoFocus
+            value={dimVal}
+            min={60}
+            onChange={(v) => setDimVal(v ?? null)}
+            onPressEnter={commitDim}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') setDimEdit(null);
+            }}
+            style={{ width: 110 }}
+          />
           <Button size="small" type="primary" onClick={commitDim}>
             确定
           </Button>

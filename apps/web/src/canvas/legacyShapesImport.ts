@@ -1,39 +1,39 @@
-import type { DesignComponent, DesignModel, WindowType } from '@wdd/schema';
-import type { DesignerStore, SketchShape } from '../store';
+import type { DesignComponent, DesignModel, WindowDesign, WindowType } from '@wdd/schema';
+import type { LegacyShape } from './legacyShape';
 
-export function buildShapesFromDesignModel(model: DesignModel): SketchShape[] {
-  const components = [...model.components].sort((a, b) => rankKind(a.kind) - rankKind(b.kind));
-  const shapes: SketchShape[] = [];
-
-  for (const component of components) {
-    const shape: SketchShape = {
-      id: component.sourceShapeId ?? component.id,
-      type: 'rect',
-      bbox: { x: component.x, y: component.y, w: component.w, h: component.h },
-      topRatio: 1,
-      text: component.label ?? '',
-      componentKind: component.kind,
-      materialRole: materialRoleFromKind(component.kind),
-      windowType: component.windowType,
-      side: component.hingeSide === 'left' || component.hingeSide === 'right' ? component.hingeSide : undefined,
-      openDir: component.openDirection,
-      label: component.label,
-    };
-    if (component.kind === 'mullion') {
-      shape.type = Math.abs(component.w) >= Math.abs(component.h) ? 'rect' : 'line';
-      if (shape.type === 'line') {
-        shape.p1 = { x: component.x, y: component.y };
-        shape.p2 = { x: component.x + component.w, y: component.y + component.h };
-        shape.text = '';
-      }
-    }
-    shapes.push(shape);
-  }
-
-  return shapes;
+interface LegacyImportContext {
+  design: Pick<WindowDesign, 'id' | 'name' | 'openingW' | 'openingH' | 'seriesId' | 'glassId'>;
 }
 
-export function buildDesignModelFromShapes(shapes: SketchShape[], state: DesignerStore): DesignModel | null {
+const LEGACY_SHAPE_TYPES = new Set<LegacyShape['type']>(['rect', 'trapezoid', 'gothic', 'arch', 'line', 'text']);
+
+/** 宽松读取历史 JSON，并在导入边界补齐旧版本缺失的字段。 */
+export function normalizeLegacyShapes(value: unknown): LegacyShape[] {
+  if (!Array.isArray(value)) return [];
+  const result: LegacyShape[] = [];
+  for (const candidate of value) {
+    if (!candidate || typeof candidate !== 'object') continue;
+    const shape = candidate as Record<string, unknown>;
+    const bbox = shape.bbox as Record<string, unknown> | undefined;
+    if (
+      typeof shape.id !== 'string' ||
+      !LEGACY_SHAPE_TYPES.has(shape.type as LegacyShape['type']) ||
+      !bbox ||
+      !['x', 'y', 'w', 'h'].every((key) => Number.isFinite(bbox[key]))
+    ) {
+      continue;
+    }
+    result.push({
+      ...(candidate as LegacyShape),
+      topRatio: Number.isFinite(shape.topRatio) ? Number(shape.topRatio) : 1,
+      text: typeof shape.text === 'string' ? shape.text : '',
+    });
+  }
+  return result;
+}
+
+/** 旧 ShapeModel JSON 的一次性导入解析；禁止在运行时渲染/计算链路调用。 */
+export function buildDesignModelFromLegacyShapes(shapes: LegacyShape[], state: LegacyImportContext): DesignModel | null {
   const areaShapes = shapes.filter((s) => ['rect', 'trapezoid', 'arch', 'gothic'].includes(s.type));
   const lineShapes = shapes.filter((s) => s.type === 'line');
   if (!areaShapes.length) return null;
@@ -53,7 +53,7 @@ export function buildDesignModelFromShapes(shapes: SketchShape[], state: Designe
   }));
 
   /** 面板/中梃归属：中心点所在的最近外框，未命中回退第一个外框 */
-  const hostFrameId = (shape: SketchShape): string => {
+  const hostFrameId = (shape: LegacyShape): string => {
     const cx = shape.bbox.x + shape.bbox.w / 2;
     const cy = shape.bbox.y + shape.bbox.h / 2;
     const host = frameShapes.find(
@@ -144,11 +144,11 @@ export function buildDesignModelFromShapes(shapes: SketchShape[], state: Designe
   };
 }
 
-function largestShape(shapes: SketchShape[]): SketchShape {
+function largestShape(shapes: LegacyShape[]): LegacyShape {
   return shapes.reduce((best, next) => (area(next) > area(best) ? next : best), shapes[0]);
 }
 
-function inferKind(shape: SketchShape): DesignComponent['kind'] {
+function inferKind(shape: LegacyShape): DesignComponent['kind'] {
   if (shape.componentKind === 'mullion' || shape.materialRole === 'mullion') return 'mullion';
   if (shape.windowType === 'sliding') return 'slidingSash';
   if (shape.windowType === 'topHinged') return 'topHungSash';
@@ -157,13 +157,13 @@ function inferKind(shape: SketchShape): DesignComponent['kind'] {
   return 'fixedGlass';
 }
 
-function inferWindowType(shape: SketchShape): WindowType {
+function inferWindowType(shape: LegacyShape): WindowType {
   if (shape.windowType) return shape.windowType;
   if (shape.side || shape.openDir) return 'casement';
   return 'fixed';
 }
 
-function area(shape: SketchShape): number {
+function area(shape: LegacyShape): number {
   return shape.bbox.w * shape.bbox.h;
 }
 
@@ -171,36 +171,3 @@ function windowTypeFromSash(kind: 'casementSash' | 'topHungSash'): WindowType {
   return kind === 'topHungSash' ? 'topHinged' : 'casement';
 }
 
-function materialRoleFromKind(kind: DesignComponent['kind']): string | undefined {
-  switch (kind) {
-    case 'outerFrame':
-      return 'frame';
-    case 'fixedGlass':
-      return 'glass';
-    case 'casementSash':
-    case 'slidingSash':
-    case 'topHungSash':
-      return 'sash';
-    case 'mullion':
-      return 'mullion';
-    default:
-      return undefined;
-  }
-}
-
-function rankKind(kind: DesignComponent['kind']): number {
-  switch (kind) {
-    case 'outerFrame':
-      return 0;
-    case 'mullion':
-      return 1;
-    case 'fixedGlass':
-      return 2;
-    case 'slidingSash':
-    case 'casementSash':
-    case 'topHungSash':
-      return 3;
-    default:
-      return 4;
-  }
-}

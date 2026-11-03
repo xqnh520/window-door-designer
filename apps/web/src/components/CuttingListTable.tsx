@@ -1,29 +1,30 @@
 import { useMemo } from 'react';
-import { Button, Divider, Space, Table, Typography } from 'antd';
-import { computeBom, computeBomFromDesignModel, computeCuttingList, cuttingPackToCsv, cuttingToCsv } from '@wdd/core';
+import { Button, Divider, Empty, Space, Table, Typography } from 'antd';
+import { computeBomFromDesignModel, computeCuttingList, cuttingPackToCsv, cuttingToCsv } from '@wdd/core';
 import type { DesignModel } from '@wdd/schema';
-import { useStore } from '../store';
+import { selectCurrentDesignName, selectCurrentSeriesId, useStore } from '../store';
 import { downloadText } from '../util/download';
-import { buildDesignModelFromShapes } from '../canvas/designModelAdapter';
+import { projectAssembly } from '../canvas/modelProjection';
 
 export function CuttingListTable({ modelOverride }: { modelOverride?: DesignModel | null }) {
-  const design = useStore((s) => s.design);
+  const designName = useStore(selectCurrentDesignName);
+  const seriesId = useStore(selectCurrentSeriesId);
   const library = useStore((s) => s.library);
-  const shapes = useStore((s) => s.shapes);
-  const series = library.series.find((s) => s.id === design.seriesId) ?? library.series[0];
-  const state = useStore.getState();
+  const assembly = useStore((s) => s.assembly);
+  const series = library.series.find((s) => s.id === seriesId) ?? library.series[0];
 
   const cutting = useMemo(() => {
-    const model = modelOverride ?? buildDesignModelFromShapes(shapes, state);
-    const bom = model ? computeBomFromDesignModel(model, series, library) : computeBom(design, series, library);
-    return computeCuttingList(bom, series);
-  }, [design, series, library, shapes, state, modelOverride]);
+    const model = modelOverride !== undefined ? modelOverride : projectAssembly(assembly);
+    return model ? computeCuttingList(computeBomFromDesignModel(model, series, library), series) : null;
+  }, [series, library, assembly, modelOverride]);
+
+  if (!cutting) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="画布为空，暂无下料数据" />;
 
   const exportItems = () => {
-    downloadText(`${design.name}-下料明细.csv`, cuttingToCsv(cutting, `${design.name} 门窗下料明细`));
+    downloadText(`${designName}-下料明细.csv`, cuttingToCsv(cutting, `${designName} 门窗下料明细`));
   };
   const exportPacks = () => {
-    downloadText(`${design.name}-排料单.csv`, cuttingPackToCsv(cutting, `${design.name} 门窗排料单`));
+    downloadText(`${designName}-排料单.csv`, cuttingPackToCsv(cutting, `${designName} 门窗排料单`));
   };
 
   const packRows = cutting.packs.map((pack, i) => ({ ...pack, index: i + 1 }));

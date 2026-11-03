@@ -1,7 +1,7 @@
-import type { BomItem } from './bom.js';
+import type { BomItem, BomResult } from './bom.js';
 import { computeBilledArea } from './bom.js';
 import { computeGeometry } from './geometry.js';
-import type { MaterialLibrary, SeriesSpec, WindowDesign } from '@wdd/schema';
+import type { DesignModel, MaterialLibrary, SeriesSpec, WindowDesign } from '@wdd/schema';
 
 /**
  * 报价规则集（配置化）：全部费用项按单樘计，最终随 windowCount 一并放大。
@@ -99,6 +99,39 @@ export function quoteFromBom(
   const openingAreaM2 = round2((design.openingW * design.openingH) / 1e6);
   const billedAreaM2 = round2(computeBilledArea(geometry.sizes.panels, rules.minAreaPerPanel));
   const sashCount = extra.sashCount ?? design.panels.filter((p) => p.hasSash || p.windowType !== 'fixed').length;
+  return quoteFromContext(openingAreaM2, billedAreaM2, sashCount, bom, rules, windowCount, discountRate, extra);
+}
+
+/**
+ * DesignModel 报价入口：与当前画布/BOM 共用同一份模型，不再借用旧 WindowDesign
+ * 的 panels 计算计价面积。billedAreaM2 直接采用同次 BOM 计算结果，保证报价与
+ * 材料清单对异形、组合窗和扩展构件的口径一致。
+ */
+export function quoteFromDesignModel(
+  model: DesignModel,
+  bom: BomResult,
+  rules: QuoteRuleSet,
+  windowCount: number,
+  discountRate: number,
+  extra: QuoteExtra = {},
+): QuoteEngineResult {
+  const openingAreaM2 = round2((model.openingW * model.openingH) / 1e6);
+  const sashCount =
+    extra.sashCount ??
+    model.components.filter((c) => c.kind === 'casementSash' || c.kind === 'slidingSash' || c.kind === 'topHungSash').length;
+  return quoteFromContext(openingAreaM2, bom.billedAreaM2, sashCount, bom.items, rules, windowCount, discountRate, extra);
+}
+
+function quoteFromContext(
+  openingAreaM2: number,
+  billedAreaM2: number,
+  sashCount: number,
+  bom: BomItem[],
+  rules: QuoteRuleSet,
+  windowCount: number,
+  discountRate: number,
+  extra: QuoteExtra,
+): QuoteEngineResult {
   const ctx = { openingAreaM2, billedAreaM2, sashCount };
 
   if (rules.areaPricePerM2 > 0) {

@@ -1,9 +1,8 @@
 /**
- * 图形数据模型：与 store 的 SketchShape 保持同构（新增 gothic 尖拱）。
+ * 旧图形编辑模型（新增 gothic 尖拱）。仅供兼容几何工具使用，不是运行时业务状态。
  * 图形节点统一为 Konva.Group（放在 bbox 原点，子图形用相对坐标 0..w/0..h），
  * 便于 Konva.Transformer 缩放后把 scale 烘焙回模型。
  */
-import type { Pt, SketchShape } from '../store';
 import type { ComponentKind, WindowType } from '@wdd/schema';
 import {
   sampleOutline as coreSampleOutline,
@@ -13,10 +12,10 @@ import {
   archpath as coreArchpath,
   shapeCentroid as coreShapeCentroid,
   type FrameShape,
-  type Pt as CorePt,
+  type Pt,
 } from '@wdd/core';
 
-export type ShapeType = SketchShape['type'];
+export type ShapeType = 'rect' | 'trapezoid' | 'gothic' | 'arch' | 'line' | 'text';
 
 export interface Box {
   x: number;
@@ -111,10 +110,6 @@ export const cloneModel = (m: ShapeModel): ShapeModel => ({
   windowType: m.windowType,
 });
 
-export const toStoreShape = (m: ShapeModel): SketchShape => cloneModel(m) as SketchShape;
-
-export const fromStoreShape = (s: SketchShape): ShapeModel => cloneModel(s as ShapeModel);
-
 export const dist = (a: Pt, b: Pt) => Math.hypot(b.x - a.x, b.y - a.y);
 export const bBoxOf = (pts: Pt[]): Box => {
   const xs = pts.map((p) => p.x);
@@ -149,7 +144,7 @@ export function gothicSideLen(m: ShapeModel): number {
 
 /** 多边形按距离向质心内缩 */
 export function insetPolygon(pts: Pt[], inset: number): Pt[] {
-  return coreInsetPolygon(pts as CorePt[], inset) as Pt[];
+  return coreInsetPolygon(pts, inset) as Pt[];
 }
 
 /**

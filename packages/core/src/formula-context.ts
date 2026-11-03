@@ -1,4 +1,4 @@
-import type { SeriesCutRow, SeriesSpec, WindowType } from '@wdd/schema';
+import type { DesignComponent, DesignModel, SeriesCutRow, SeriesSpec, WindowType } from '@wdd/schema';
 import type { DesignGeometry } from './geometry.js';
 import { evaluateFormula, type FormulaContext } from './formula.js';
 
@@ -95,6 +95,72 @@ export function formulaContextFromPanel(
     glassH: panel.glassH,
     sashCount: panel.sashCount,
   };
+}
+
+/**
+ * DesignModel 公式上下文：公式预览与 DesignModel BOM 共用同一模型口径。
+ * target 省略时优先选第一块面板；存在 parentId 时以所属外框尺寸为准，
+ * 避免组合窗把整个装配体宽高误当成每个单窗的框料尺寸。
+ */
+export function formulaContextFromDesignModel(
+  model: DesignModel,
+  series: SeriesSpec,
+  target?: DesignComponent,
+): FormulaContext {
+  const panelKinds = new Set([
+    'fixedGlass',
+    'casementSash',
+    'slidingSash',
+    'topHungSash',
+    'screen',
+    'subSash',
+    'sashInSash',
+    'pushInSash',
+    'foldSash',
+    'foldScreen',
+  ]);
+  const component = target ?? model.components.find((c) => panelKinds.has(c.kind));
+  const frame = component?.kind === 'outerFrame'
+    ? component
+    : model.components.find((c) => c.kind === 'outerFrame' && c.id === component?.parentId) ??
+      model.components.find((c) => c.kind === 'outerFrame');
+  const frameOuterW = Math.max(1, frame?.w ?? model.openingW - 2 * series.installGap);
+  const frameOuterH = Math.max(1, frame?.h ?? model.openingH - 2 * series.installGap);
+  const base = formulaContextFromGeometry(
+    {
+      sizes: {
+        frameOuterW,
+        frameOuterH,
+        frameInnerW: Math.max(1, frameOuterW - 2 * series.frameWidth),
+        frameInnerH: Math.max(1, frameOuterH - 2 * series.frameWidth),
+      },
+    },
+    series,
+    model,
+  );
+  if (!component || !panelKinds.has(component.kind)) return base;
+
+  const hasSash = component.kind !== 'fixedGlass';
+  const leaves = component.leaves ?? 1;
+  const meeting = Math.max(1, component.meetingWidthMm ?? 60);
+  const sashCount = component.kind === 'slidingSash' ? 2 : hasSash ? leaves : 0;
+  const panelOpenW = Math.max(1, component.w - 2 * series.frameWidth);
+  const panelOpenH = Math.max(1, component.h - 2 * series.frameWidth);
+  const sashW = component.kind === 'slidingSash'
+    ? Math.round((panelOpenW + series.overlap) / 2)
+    : leaves === 2
+      ? Math.round((panelOpenW + meeting) / 2)
+      : Math.round(panelOpenW - 2 * series.frameWidth + 2 * series.overlap);
+  const sashH = Math.round(panelOpenH - 2 * series.frameWidth + 2 * series.overlap);
+  const glassW = hasSash
+    ? Math.max(1, Math.round(sashW - (leaves === 2 ? series.sashWidth + meeting : 2 * series.sashWidth) - 2 * series.glassGap))
+    : Math.max(1, Math.round(panelOpenW - 2 * series.glassGap));
+  const panelHeight = component.infill === 'panel' ? Math.max(1, component.panelHeightMm ?? 200) : 0;
+  const glassH = hasSash
+    ? Math.max(1, Math.round(sashH - 2 * series.sashWidth - 2 * series.glassGap - (panelHeight ? panelHeight + series.sashWidth : 0)))
+    : Math.max(1, Math.round(panelOpenH - 2 * series.glassGap));
+
+  return { ...base, panelOpenW, panelOpenH, sashW, sashH, glassW, glassH, sashCount };
 }
 
 /** @deprecated 前端公式配置弹窗（FormulaConfigModal）仍在使用的旧校验；v2 请用 validateCutRows */

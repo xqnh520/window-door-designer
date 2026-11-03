@@ -188,9 +188,9 @@ const SHAPE_SPECS: Partial<Record<FrameShape, ShapeSpec>> = {
   parallelogram: { base: 'parallelogram' },
 };
 
-const ARC_SEG = 16;
+const ARC_SEG = 360;
 
-/** 单位正方形（0..1，y 轴向下）内的基础轮廓；弧形按 16 段折线逼近 */
+/** 单位正方形（0..1，y 轴向下）内的基础轮廓；弧形按 360 段折线逼近 */
 function unitBase(base: BaseShape, topRatio: number): Pt[] {
   const arc = (cx: number, cy: number, from: number, to: number): Pt[] => {
     const out: Pt[] = [];
@@ -365,8 +365,9 @@ export function sampleOutline(shape: FrameShape, box: Box, instr: { inset?: numb
         const rp = { x: b.x + b.w, y: arcY };
         const br = { x: b.x + b.w, y: b.y + b.h };
         const arcPts: Pt[] = [];
-        for (let i = 1; i < 8; i++) {
-          const theta = Math.PI - (Math.PI * i) / 8;
+        const archSeg = 64;
+        for (let i = 1; i < archSeg; i++) {
+          const theta = Math.PI - (Math.PI * i) / archSeg;
           arcPts.push({ x: b.x + rx + rx * Math.cos(theta), y: arcY - rise * Math.sin(theta) });
         }
         pts = [bl, l, ...arcPts, rp, br];
@@ -379,7 +380,7 @@ export function sampleOutline(shape: FrameShape, box: Box, instr: { inset?: numb
         const apex = { x: b.x + b.w / 2, y: b.y };
         const c2 = { x: b.x + b.w * 0.96, y: b.y + b.h * 0.45 };
         const br = { x: b.x + b.w, y: b.y + b.h };
-        pts = [bl, ...quadSample(bl, c1, apex, 8), ...quadSample(apex, c2, br, 8), br];
+        pts = [bl, ...quadSample(bl, c1, apex, 32), ...quadSample(apex, c2, br, 32), br];
         break;
       }
       default:

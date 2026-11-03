@@ -54,7 +54,10 @@ export function StudioToolFlyout({
       onClose();
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+      if (e.key !== 'Escape') return;
+      // 阻断到 window 的冒泡：设计器把 Esc 也用作「退回选择工具」，此处只该关掉本面板
+      e.stopPropagation();
+      onClose();
     };
     document.addEventListener('mousedown', onDown);
     document.addEventListener('keydown', onKey);

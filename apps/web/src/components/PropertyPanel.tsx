@@ -1,13 +1,13 @@
 import { Form, InputNumber, Select, Typography } from 'antd';
-import { useStore } from '../store';
+import { selectCurrentGlassId, selectCurrentOpeningH, selectCurrentOpeningW, selectCurrentSeriesId, useStore } from '../store';
 
 export function PropertyPanel() {
   const library = useStore((s) => s.library);
-  const seriesId = useStore((s) => s.design.seriesId);
-  const openingW = useStore((s) => s.openingW);
-  const openingH = useStore((s) => s.openingH);
+  const seriesId = useStore(selectCurrentSeriesId);
+  const openingW = useStore(selectCurrentOpeningW);
+  const openingH = useStore(selectCurrentOpeningH);
   const windowCount = useStore((s) => s.windowCount);
-  const glassId = useStore((s) => s.design.glassId);
+  const glassId = useStore(selectCurrentGlassId);
   const setSeries = useStore((s) => s.setSeries);
   const setOpeningSize = useStore((s) => s.setOpeningSize);
   const setGlass = useStore((s) => s.setGlass);

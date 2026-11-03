@@ -1,13 +1,20 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createWindowTree, splitArea, setSash, layoutContours, type WindowTree } from '../src/window-tree.js';
+import { createWindowTree, splitArea, setSash, layoutContours, sashWidthOf, type WindowTree } from '../src/window-tree.js';
 import { describeWindowTree } from '../src/window-tree-describe.js';
+import { pointInPoly, polygonArea, type Pt } from '../src/outline.js';
 
 const GAP = 20;
 const FW = 60;
 
 function makeTree(): WindowTree {
   return createWindowTree({ openingW: 1500, openingH: 1100, seriesId: 'series-60', glassId: 'g-5-12a-5', frameWidthMm: FW, name: '描述' });
+}
+
+function pointsOf(flat: number[] | undefined): Pt[] {
+  const points: Pt[] = [];
+  for (let i = 0; flat && i + 1 < flat.length; i += 2) points.push({ x: flat[i], y: flat[i + 1] });
+  return points;
 }
 
 test('描述：外框元素几何正确', () => {
@@ -127,4 +134,78 @@ test('描述：异形轮廓点为局部坐标（相对元素 x/y），渲染层�
     assert.ok(Math.abs(lp[i * 2] + leaf.x - world[i].x) < 1e-6, `叶子局部点还原世界 x[${i}]`);
     assert.ok(Math.abs(lp[i * 2 + 1] + leaf.y - world[i].y) < 1e-6, `叶子局部点还原世界 y[${i}]`);
   }
+});
+
+test('描述：对开百叶的扇语义和单叶几何在 core 中一次解析', () => {
+  const tree = makeTree();
+  setSash(tree, tree.root!.id, {
+    windowType: 'casement',
+    hingeSide: 'left',
+    openDirection: 'out',
+    label: 'L2',
+    leaves: 2,
+    infill: 'louver',
+  });
+
+  const area = describeWindowTree(tree, GAP).find((e) => e.kind === 'area')!;
+  assert.equal(area.sashInsetMm, sashWidthOf(tree));
+  assert.equal(area.sashLeaves, 2);
+  assert.equal(area.sashInfill, 'louver');
+  assert.equal(area.sashLeafGeometries?.length, 2);
+  assert.equal(area.sashLeafGeometries?.[0].hinge, 'left');
+  assert.equal(area.sashLeafGeometries?.[1].hinge, 'right');
+  assert.equal(area.sashLeafGeometries?.[0].w, area.sashLeafGeometries?.[1].w);
+  assert.ok((area.sashLeafGeometries?.[0].louver?.slatYs.length ?? 0) >= 2);
+  assert.ok((area.louverPitchMm ?? 0) > 0);
+});
+
+test('描述：上玻下板和玻璃格条在 core 中产出显式渲染几何', () => {
+  const tree = makeTree();
+  setSash(tree, tree.root!.id, {
+    windowType: 'casement',
+    hingeSide: 'right',
+    openDirection: 'in',
+    label: 'P1',
+    infill: 'panel',
+  });
+  tree.root!.bars = { pattern: 'colonial', cols: 2, rows: 2 };
+
+  const area = describeWindowTree(tree, GAP).find((e) => e.kind === 'area')!;
+  assert.equal(area.sashInfill, 'panel');
+  assert.ok(area.panel, '单扇应直接提供上玻下板布局');
+  assert.ok((area.panel?.glass.h ?? 0) > 0);
+  assert.ok((area.panel?.panel.h ?? 0) > 0);
+  assert.equal(area.glassBars?.lines.length, 2);
+});
+
+test('描述：异形扇的内缩轮廓、内容锚点和把手最终落点均由 core 给出', () => {
+  const tree = createWindowTree({
+    openingW: 1500,
+    openingH: 1200,
+    seriesId: 'series-60',
+    glassId: 'g-5-12a-5',
+    frameWidthMm: FW,
+    name: '三角异形扇',
+    frameShape: 'triangle',
+  });
+  setSash(tree, tree.root!.id, {
+    windowType: 'casement',
+    hingeSide: 'left',
+    openDirection: 'out',
+    label: 'T1',
+  });
+
+  const area = describeWindowTree(tree, GAP).find((e) => e.kind === 'area')!;
+  const outer = pointsOf(area.points);
+  const pane = pointsOf(area.panePoints);
+  const sashGlass = pointsOf(area.sashGlassPoints);
+  const handle = area.handlePlacements?.[0];
+
+  assert.ok(outer.length >= 3, '异形叶区应提供外轮廓');
+  assert.ok(pane.length >= 3, '异形叶区应提供内缩后的内容轮廓');
+  assert.ok(sashGlass.length >= 3, '异形开启扇应提供扇玻璃轮廓');
+  assert.ok(Math.abs(polygonArea(pane)) < Math.abs(polygonArea(outer)), '内容轮廓面积应小于叶区外轮廓');
+  assert.ok(Math.abs(polygonArea(sashGlass)) < Math.abs(polygonArea(outer)), '扇玻璃轮廓面积应小于叶区外轮廓');
+  assert.ok(area.contentAnchor && pointInPoly(area.contentAnchor, outer), '内容锚点应位于叶区轮廓内');
+  assert.ok(handle && pointInPoly({ x: handle.drawX, y: handle.drawY }, outer), '把手最终落点应位于叶区轮廓内');
 });

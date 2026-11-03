@@ -1,11 +1,11 @@
 import { useMemo, useState } from 'react';
-import { Button, Divider, Form, Input, InputNumber, List, Select, Space, Typography, message } from 'antd';
-import { computeBom, computeBomFromDesignModel, quoteToCsv, quoteFromBom, defaultQuoteRuleSet } from '@wdd/core';
+import { Button, Divider, Empty, Form, Input, InputNumber, List, Select, Space, Typography, message } from 'antd';
+import { computeBomFromDesignModel, quoteToCsv, quoteFromDesignModel, defaultQuoteRuleSet } from '@wdd/core';
 import type { DesignModel } from '@wdd/schema';
-import { useStore } from '../store';
+import { selectCurrentDesignName, selectCurrentSeriesId, useStore } from '../store';
 import { downloadText } from '../util/download';
 import { createOrder } from '../api';
-import { buildDesignModelFromShapes } from '../canvas/designModelAdapter';
+import { projectAssembly } from '../canvas/modelProjection';
 
 /** 报价策略：成本加成（默认，叠加加价项） / 面积单价（与 BOM 解耦，按洞口面积×单价） */
 const QUOTE_RULES = {
@@ -19,45 +19,48 @@ const QUOTE_RULES = {
 };
 
 export function QuotePanel({ modelOverride }: { modelOverride?: DesignModel | null }) {
-  const design = useStore((s) => s.design);
+  const designName = useStore(selectCurrentDesignName);
+  const seriesId = useStore(selectCurrentSeriesId);
   const library = useStore((s) => s.library);
   const windowCount = useStore((s) => s.windowCount);
   const discountRate = useStore((s) => s.discountRate);
   const setDiscountRate = useStore((s) => s.setDiscountRate);
-  const shapes = useStore((s) => s.shapes);
+  const assembly = useStore((s) => s.assembly);
   const orderConfig = useStore((s) => s.orderConfig);
   const [strategy, setStrategy] = useState<'cost' | 'area'>('cost');
   const [customer, setCustomer] = useState('');
   const [phone, setPhone] = useState('');
   const [submitting, setSubmitting] = useState(false);
-  const series = library.series.find((s) => s.id === design.seriesId) ?? library.series[0];
-  const state = useStore.getState();
+  const series = library.series.find((s) => s.id === seriesId) ?? library.series[0];
 
-  const { bom, quote } = useMemo(() => {
-    const model = modelOverride ?? buildDesignModelFromShapes(shapes, state);
-    const b = model ? computeBomFromDesignModel(model, series, library) : computeBom(design, series, library);
+  const result = useMemo(() => {
+    const model = modelOverride !== undefined ? modelOverride : projectAssembly(assembly);
+    if (!model) return null;
+    const b = computeBomFromDesignModel(model, series, library);
     // 报价业务上下文：开启扇数 / 异形形状 / 颜色 / 五金档位 / 玻璃规格
     const sashCount =
       model?.components.filter((c) => c.kind === 'casementSash' || c.kind === 'slidingSash' || c.kind === 'topHungSash').length ?? 0;
     const specialShape =
-      shapes.some((s) => s.type === 'trapezoid' || s.type === 'arch' || s.type === 'gothic') ||
       !!model?.components.find((c) => c.kind === 'outerFrame' && c.shape && c.shape !== 'rect');
     const rules =
       strategy === 'area'
         ? { ...QUOTE_RULES, areaPricePerM2: orderConfig.unitPrice || 680 }
         : QUOTE_RULES;
-    const q = quoteFromBom(design, series, library, b.items, rules, windowCount, discountRate, {
+    const q = quoteFromDesignModel(model, b, rules, windowCount, discountRate, {
       sashCount,
       specialShape,
       color: orderConfig.outerColor,
       hardware: orderConfig.hardware,
-      glassId: design.glassId,
+      glassId: model.glassId,
     });
-    return { bom: b, quote: q };
-  }, [design, series, library, windowCount, discountRate, shapes, state, strategy, orderConfig, modelOverride]);
+    return { bom: b, quote: q, model };
+  }, [series, library, windowCount, discountRate, assembly, strategy, orderConfig, modelOverride]);
+
+  if (!result) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="画布为空，暂无报价" />;
+  const { bom, quote, model } = result;
 
   const exportQuote = () => {
-    downloadText(`${design.name}-报价单.csv`, quoteToCsv(quote, `${design.name} 门窗报价单`));
+    downloadText(`${designName}-报价单.csv`, quoteToCsv(quote, `${designName} 门窗报价单`));
   };
 
   const submitOrder = async () => {
@@ -70,11 +73,11 @@ export function QuotePanel({ modelOverride }: { modelOverride?: DesignModel | nu
       await createOrder({
         customer: customer.trim(),
         phone: phone.trim() || undefined,
-        designName: design.name,
-        designId: design.id,
-        openingW: design.openingW,
-        openingH: design.openingH,
-        seriesId: design.seriesId,
+        designName: model.name,
+        designId: model.id,
+        openingW: model.openingW,
+        openingH: model.openingH,
+        seriesId: model.seriesId,
         total: quote.total,
         bom: bom.items,
       });

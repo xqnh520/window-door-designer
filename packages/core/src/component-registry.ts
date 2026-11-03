@@ -4,7 +4,8 @@
  * 避免 SashType 枚举无限膨胀。windowType 仍是旧 5 类型的兼容入口；
  * roleType 为空时回退 windowType 判定（双轨，旧数据无损）。
  *
- * 本文件纯数据、无 Konva 依赖（node 测试可用）。渲染分发在 window-tree-render.ts 按 roleType switch。
+ * 本文件纯数据、无 Konva 依赖（node 测试可用）。渲染分发在
+ * apps/web/src/canvas/render/window-tree-render.ts 按 roleType 处理。
  */
 
 export type ComponentGroup = 'safety' | 'decor' | 'glazing' | 'combo' | 'fold' | 'sliding';

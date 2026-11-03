@@ -14,7 +14,7 @@
     "dev": "npm run build --workspace @wdd/schema && npm run build --workspace @wdd/core && npm run dev --workspace @wdd/web",
     "dev:desktop": "npm run dev --workspace @wdd/desktop",
     "dev:server": "npm run start:dev --workspace @wdd/server",
-    "typecheck": "npm run typecheck --workspaces --if-present"
+    "typecheck": "npm run build --workspace @wdd/schema && npm run build --workspace @wdd/core && npm run typecheck --workspaces --if-present"
   },
   "engines": {
     "node": ">=20"

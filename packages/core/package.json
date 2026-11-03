@@ -19,8 +19,7 @@
     "test": "npm run build && node --test \"dist/test/*.test.js\""
   },
   "dependencies": {
-    "@wdd/schema": "^0.1.0",
-    "konva": "^9.3.16"
+    "@wdd/schema": "^0.1.0"
   },
   "devDependencies": {
     "typescript": "^5.5.4"

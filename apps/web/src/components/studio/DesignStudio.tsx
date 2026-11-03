@@ -1,20 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Button, Checkbox, Divider, InputNumber, Modal, Select, Space, Tooltip, Typography, message } from 'antd';
 import { DeleteOutlined, LeftOutlined, RedoOutlined, SaveOutlined, UndoOutlined } from '@ant-design/icons';
-import { bomToCsv, computeBom, computeBomFromDesignModel, computeGeometry, computeCuttingList, quoteFromBom, validateDesignModel, createWindowTree, equalDivide, applyMuntinPattern, MUNTIN_PATTERN_LABEL, type MuntinPattern, DEFAULT_MUNTIN_MM, DEFAULT_MEETING_MM, DEFAULT_LOUVER_PITCH_MM, DEFAULT_PANEL_HEIGHT_MM, findArea, setSash, toDesignModel, toDesignModelAssembly, combinerDisplayLabel, CORNER_ANGLE_PRESETS, layoutTree, listComponentTypes, listFittingTypes, type ComponentTypeDef, type FittingType, type FrameShape, type FrameSide, type WindowFitting, type WindowTreeArea, type WindowTree, type WindowMuntin, type MuntinSlope, type WindowSashSpec, defaultQuoteRuleSet, FRAME_SHAPE_LABEL, TRAPEZOID_SHAPES, type GlassBarSpec, type GlassBarPattern, type FittingHost } from '@wdd/core';
+import { bomToCsv, computeBomFromDesignModel, computeCuttingList, quoteFromDesignModel, validateDesignModel, createWindowTree, MUNTIN_PATTERN_LABEL, type MuntinPattern, DEFAULT_INSTALL_GAP_MM, DEFAULT_MUNTIN_MM, DEFAULT_MEETING_MM, DEFAULT_LOUVER_PITCH_MM, DEFAULT_PANEL_HEIGHT_MM, findArea, toDesignModelAssembly, combinerDisplayLabel, CORNER_ANGLE_PRESETS, layoutTree, listComponentTypes, listFittingTypes, type ComponentTypeDef, type FittingType, type FrameShape, type FrameSide, type WindowFitting, type WindowTreeArea, type WindowTree, type WindowMuntin, type MuntinSlope, type WindowSashSpec, defaultQuoteRuleSet, FRAME_SHAPE_LABEL, TRAPEZOID_SHAPES, type GlassBarSpec, type GlassBarPattern, type FittingHost } from '@wdd/core';
 import type { DesignModel } from '@wdd/schema';
 import { sampleWindowTemplates } from '@wdd/schema';
-import { useStore } from '../../store';
+import { focusedTreeFromAssembly, selectCurrentDesignName, selectCurrentGlassId, selectCurrentSeriesId, useStore } from '../../store';
 import { downloadText } from '../../util/download';
 import { buildDrawingQuotePdfHtml, buildMaterialsPdfHtml, buildCuttingPdfHtml, printHTML } from '../../util/exportPdf';
 import type { ExportKind } from './StudioTopBar';
-import { collectDesignerPayload, seriesNameToId } from '../../crm/konva';
+import { collectDesignerPayload } from '../../crm/konva';
 import { useCrmStore } from '../../crm/store';
 import { SaveSchemeModal } from '../../crm/SaveSchemeModal';
 import type { DesignScheme, SaveSchemeInput } from '../../crm/types';
 import { TreeEditorCanvas, type TreeCanvasTool, type TreeEditorCanvasHandle } from '../TreeEditorCanvas';
-import { treeToShapes, assemblyToShapes, shapesToTree } from '../../canvas/windowTreeBridge';
-import { buildDesignModelFromShapes } from '../../canvas/designModelAdapter';
+import { projectDesignModel } from '../../canvas/modelProjection';
 import { BomTable } from '../BomTable';
 import { QuotePanel } from '../QuotePanel';
 import { CuttingListTable } from '../CuttingListTable';
@@ -120,32 +119,16 @@ export function DesignStudio({
 
   const toggleBottom = (t: StudioBottomTab) => setBottomTab(bottomTab === t ? null : t);
 
-  // CRM 方案模式：同步尺寸 / 系列 / 颜色（图形由 App 在挂载前用 prepareCrmScheme 预装）
-  useEffect(() => {
-    if (crmScheme == null) return;
-    const st = useStore.getState();
-    if (st.design.openingW !== crmScheme.totalWidth || st.design.openingH !== crmScheme.totalHeight) {
-      st.setOpeningSize(crmScheme.totalWidth, crmScheme.totalHeight);
-    }
-    st.setSeries(seriesNameToId(crmScheme.seriesName, st.library, st.seriesId));
-    if (crmScheme.colorConfig) {
-      st.setOrderConfig({ outerColor: crmScheme.colorConfig.outerColor, innerColor: crmScheme.colorConfig.innerColor });
-    }
-    // 仅挂载时执行一次（方案切换由 App 通过 key 重挂载处理）
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
   // 本地自动保存（防抖 0.5s）：画布 / 设计 / 系列 / 容器树 / 订单配置变化后落盘，断网或刷新不丢稿
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const unsub = useStore.subscribe((state, prev) => {
       if (
-        state.shapes === prev.shapes &&
         state.design === prev.design &&
         state.seriesId === prev.seriesId &&
         state.orderConfig === prev.orderConfig &&
         state.windowCount === prev.windowCount &&
-        state.windowTree === prev.windowTree
+        state.assembly === prev.assembly
       ) {
         return;
       }
@@ -171,7 +154,7 @@ export function DesignStudio({
   /** 方案导出/导入：离线备份与协作分享（JSON 格式，两端互通） */
   const handleExportScheme = () => {
     const st = useStore.getState();
-    downloadText(`${st.design.name}-方案.json`, st.exportScheme());
+    downloadText(`${selectCurrentDesignName(st)}-方案.json`, st.exportScheme());
     message.success('方案 JSON 已导出，可分享给对方直接导入');
   };
   const handleImportScheme = (text: string) => {
@@ -181,15 +164,6 @@ export function DesignStudio({
       message.error('方案文件无效，导入失败');
     }
   };
-
-  // 挂载：旧画布图形自动反推为树（如存在）；否则保持空白画布（对齐第三方「新画布=空白图纸」，用「外框」工具开始设计）
-  useEffect(() => {
-    const st = useStore.getState();
-    if (st.windowTree || !st.shapes.length) return;
-    const converted = shapesToTree(st.shapes, st);
-    if (converted) st.setWindowTree(converted);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   // 外框工具完成：空白画布（无锚单元）直接创建新窗；有窗时为「拼接新框」——记下待定矩形，弹「拼接方向」对话框
   const handleFrameCreate = (x: number, y: number, w: number, h: number) => {
@@ -204,13 +178,14 @@ export function DesignStudio({
   /** 旧行为：重画整窗（忽略原装配体，重设为自由尺寸空白窗） */
   const replaceWholeWindow = (w: number, h: number) => {
     const st = useStore.getState();
-    const series = st.library.series.find((s) => s.id === st.seriesId) ?? st.library.series[0];
+    const seriesId = selectCurrentSeriesId(st);
+    const series = st.library.series.find((s) => s.id === seriesId) ?? st.library.series[0];
     setWindowTree(
       createWindowTree({
         openingW: Math.max(400, Math.round(w)),
         openingH: Math.max(400, Math.round(h)),
-        seriesId: st.seriesId,
-        glassId: st.design.glassId,
+        seriesId,
+        glassId: selectCurrentGlassId(st),
         frameWidthMm: series.frameWidth ?? 60,
         sashWidthMm: series.sashWidth,
         name: '新窗',
@@ -224,14 +199,13 @@ export function DesignStudio({
   // 清空画布：删除全部窗框/拼樘/构件，恢复空白画布（对齐第三方工具「新画布=空白图纸」，用外框工具重新绘制）
   const handleClearCanvas = () => {
     const st = useStore.getState();
-    if (!st.windowTree && !st.assembly) return;
+    if (!st.assembly) return;
     Modal.confirm({
       title: '清空画布',
       content: '将删除当前全部窗框、拼樘与构件，画布恢复为空白（可重新自定义窗型）。确定清空？',
       onOk: () => {
         const st = useStore.getState();
         st.setWindowTree(null);
-        st.setShapesFromCanvas([]);
         setTool('framing');
         setPlaceSpec(null);
         setPendingFrame(null);
@@ -240,13 +214,16 @@ export function DesignStudio({
     });
   };
 
-  // ── R4 容器树设计模式：由 store 持有，草稿/方案持久化，树为算料/报价权威数据 ──
-  const windowTree = useStore((s) => s.windowTree);
+  // ── WindowAssembly 是唯一业务状态；聚焦树是只读布局投影 ──
   const setWindowTree = useStore((s) => s.setWindowTree);
   const assembly = useStore((s) => s.assembly);
   const focusedUnitId = useStore((s) => s.focusedUnitId);
+  const windowTree = useMemo(
+    () => focusedTreeFromAssembly(assembly, focusedUnitId),
+    [assembly, focusedUnitId],
+  );
   const selectedCombinerId = useStore((s) => s.selectedCombinerId);
-  const setFocusedTree = useStore((s) => s.setFocusedTree);
+  const dispatchCanvas = useStore((s) => s.dispatchCanvas);
   const setFocusedUnit = useStore((s) => s.setFocusedUnit);
   const selectCombiner = useStore((s) => s.selectCombiner);
   const addDrawnFrame = useStore((s) => s.addDrawnFrame);
@@ -276,7 +253,7 @@ export function DesignStudio({
   const suggestedDir = useMemo<'up' | 'down' | 'left' | 'right' | null>(() => {
     const f = pendingFrame;
     if (!f || !windowTree) return null;
-    const fr = layoutTree(windowTree, { installGap: 20 }).frame;
+    const fr = layoutTree(windowTree, { installGap: DEFAULT_INSTALL_GAP_MM }).frame;
     const dx = f.x + f.w / 2 - (fr.x + fr.w / 2);
     const dy = f.y + f.h / 2 - (fr.y + fr.h / 2);
     if (Math.abs(dx) >= Math.abs(dy)) return dx >= 0 ? 'right' : 'left';
@@ -294,40 +271,29 @@ export function DesignStudio({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingFrame]);
 
-  // 装配 → DesignModel：有拼樘/多单元时以整体装配为权威（含全部单元 + 拼樘料）；否则聚焦单元树
+  // 装配 → DesignModel：始终包含全部单元与拼樘。
   const treeModel = useMemo<DesignModel | null>(() => {
-    if (assembly && assembly.units.length) {
-      return toDesignModelAssembly(assembly, {
-        installGap: 20,
-        name: assembly.name,
-        seriesId: assembly.seriesId,
-        glassId: assembly.glassId,
-      });
-    }
-    if (!windowTree) return null;
-    return toDesignModel(windowTree, {
-      installGap: 20,
-      name: windowTree.name,
-      seriesId: windowTree.seriesId,
-      glassId: windowTree.glassId,
+    if (!assembly?.units.length) return null;
+    return toDesignModelAssembly(assembly, {
+      installGap: DEFAULT_INSTALL_GAP_MM,
+      name: assembly.name,
+      seriesId: assembly.seriesId,
+      glassId: assembly.glassId,
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [assembly, windowTree]);
+  }, [assembly]);
   /** 放置构件到指定分格：registry id 走 roleType，legacy 5 类走 windowType（分类菜单选中后点分格触发） */
   const applyPlace = (areaId: string, type: string) => {
     if (!windowTree) return;
     if (roleComponents[type]) {
       // 构件体系扩展类型：承载 windowType 用 fixed，roleType 标记实际类型
       const def = roleComponents[type];
-      setSash(windowTree, areaId, { windowType: 'fixed', roleType: def.id, label: def.label });
-      setFocusedTree({ ...windowTree });
+      dispatchCanvas({ type: 'set-sash', areaId, spec: { windowType: 'fixed', roleType: def.id, label: def.label } });
       message.success(`已放置${def.label}`);
       return;
     }
     const spec = PLACE_SPECS[type];
     if (!spec) return;
-    setSash(windowTree, areaId, { ...spec });
-    setFocusedTree({ ...windowTree });
+    dispatchCanvas({ type: 'set-sash', areaId, spec: { ...spec } });
     message.success(`已放置${PLACE_TYPE_LABEL[type] ?? type}`);
   };
 
@@ -377,12 +343,10 @@ export function DesignStudio({
     }
     if (!windowTree) return;
     if (fittingHost === 'tree') {
-      windowTree.fittings = [...(windowTree.fittings ?? []), fit];
+      dispatchCanvas({ type: 'set-fittings', host: 'tree', fittings: [...currentFittings, fit] });
     } else if (fittingAreaId) {
-      const area = findArea(windowTree, fittingAreaId);
-      if (area) area.fittings = [...(area.fittings ?? []), fit];
+      dispatchCanvas({ type: 'set-fittings', host: 'area', areaId: fittingAreaId, fittings: [...currentFittings, fit] });
     }
-    setFocusedTree({ ...windowTree });
     setFittingOpen(false);
     message.success('已添加配件');
   };
@@ -395,19 +359,17 @@ export function DesignStudio({
     }
     if (!windowTree) return;
     if (fittingHost === 'tree') {
-      windowTree.fittings = (windowTree.fittings ?? []).filter((_, i) => i !== index);
+      dispatchCanvas({ type: 'set-fittings', host: 'tree', fittings: currentFittings.filter((_, i) => i !== index) });
     } else if (fittingAreaId) {
-      const area = findArea(windowTree, fittingAreaId);
-      if (area) area.fittings = (area.fittings ?? []).filter((_, i) => i !== index);
+      dispatchCanvas({ type: 'set-fittings', host: 'area', areaId: fittingAreaId, fittings: currentFittings.filter((_, i) => i !== index) });
     }
-    setFocusedTree({ ...windowTree });
     message.success('已移除配件');
   };
 
   /** 等分：把选中的未分割分格按 n 等分（选中外框时不可用；已放扇的格子等分后得到 n 个独立扇） */
   const confirmDivide = () => {
     if (!windowTree || !focusShapeId || focusShapeId === 'frame') return;
-    const ok = equalDivide(windowTree, focusShapeId, divideDir, divideN, 20);
+    const ok = !!dispatchCanvas({ type: 'equal-divide', areaId: focusShapeId, direction: divideDir, count: divideN });
     if (!ok) {
       message.error(
         divideDir === 'diagonal' || divideDir === 'antiDiagonal'
@@ -416,7 +378,6 @@ export function DesignStudio({
       );
       return;
     }
-    setFocusedTree({ ...windowTree });
     setDivideOpen(false);
     message.success(`已等分为 ${divideN} 份`);
   };
@@ -424,11 +385,11 @@ export function DesignStudio({
   /** 复合梃预设：一键把选中分格切成整套对称分格；切不出时核心已整单回滚，这里只提示 */
   const applyPattern = (pattern: MuntinPattern) => {
     if (!windowTree || !focusShapeId || focusShapeId === 'frame') return;
-    if (!applyMuntinPattern(windowTree, focusShapeId, pattern, { installGap: 20 })) {
+    const applied = dispatchCanvas({ type: 'muntin-pattern', areaId: focusShapeId, pattern });
+    if (!applied) {
       message.error('该分格的尺寸/形状不足以套这组分格，未做任何改动');
       return;
     }
-    setFocusedTree({ ...windowTree });
     message.success(`已套用「${MUNTIN_PATTERN_LABEL[pattern]}」`);
   };
 
@@ -438,11 +399,10 @@ export function DesignStudio({
     handleToolChange('framing');
   };
 
-  /** 改选中分格的格条：沿用浮层原有写法——就地改树后浅拷贝整树触发重渲染 */
+  /** 改选中分格的格条：只提交 area patch，不直接修改聚焦树镜像。 */
   const mutateSelectedBars = (mut: (bars: GlassBarSpec | undefined) => GlassBarSpec | undefined) => {
     if (!windowTree || !selectedLeafArea) return;
-    selectedLeafArea.bars = mut(selectedLeafArea.bars);
-    setFocusedTree({ ...windowTree });
+    dispatchCanvas({ type: 'patch-area', areaId: selectedLeafArea.id, patch: { bars: mut(selectedLeafArea.bars) } });
   };
 
   const handlePickBarPattern = (p: GlassBarPattern | 'none') => {
@@ -470,22 +430,13 @@ export function DesignStudio({
   // 「保存到客户」守卫弹窗（CRM 模式且未选择客户时弹出）
   const [saveCustomerOpen, setSaveCustomerOpen] = useState(false);
 
-  /** 执行 CRM 方案保存（收集画布数据 → onSaveScheme；容器树模式先转成旧图形格式） */
+  /** 执行 CRM 方案保存；兼容图形由 CRM 边界从 WindowAssembly 单向投影。 */
   const doCrmSave = async () => {
     if (!onSaveScheme) return;
-    const st = useStore.getState();
-    // 容器树/装配设计模式：把整体渲染为兼容图形，供 CRM 方案保存（多单元含全部窗框 + 拼樘料）
-    if (st.assembly && st.assembly.units.length > 1) {
-      const series = st.library.series.find((s) => s.id === st.assembly!.seriesId) ?? st.library.series[0];
-      st.setShapesFromCanvas(assemblyToShapes(st.assembly, series));
-    } else if (st.windowTree) {
-      const series = st.library.series.find((s) => s.id === st.windowTree!.seriesId) ?? st.library.series[0];
-      st.setShapesFromCanvas(treeToShapes(st.windowTree, series));
-    }
     const payload = collectDesignerPayload();
     await onSaveScheme({
       schemeId: crmScheme?.id,
-      name: crmScheme?.name ?? `方案-${st.design.openingW}x${st.design.openingH}`,
+      name: crmScheme?.name ?? `方案-${payload.totalWidth}x${payload.totalHeight}`,
       shapes: payload.shapes,
       colorConfig: payload.colorConfig,
       totalWidth: payload.totalWidth,
@@ -512,9 +463,10 @@ export function DesignStudio({
     if (!customerId) {
       setSaveCustomerOpen(true); // 提醒：选择 / 新建客户，或退出
       return;
-    }try{
-    await doCrmSave();
-    }catch(err){
+    }
+    try {
+      await doCrmSave();
+    } catch (err) {
       message.error(`保存失败：${(err as Error).message}`);
     }
   };
@@ -530,14 +482,102 @@ export function DesignStudio({
     }
   };
 
+  // ── 全局快捷键 ────────────────────────────────────────────
+  // 顶栏按钮与 Tooltip 早已承诺 Ctrl+S / Ctrl+Z，但快捷键一直没绑定；此处补齐到同一批动作上。
+  // ctx 随渲染更新，监听器只绑一次，避免为拿到最新 state 而反复重挂 window 监听。
+  const shortcutCtx = useRef({
+    tool: 'select' as TreeCanvasTool,
+    /** 有浮层/对话框打开时让 Esc 归它们管，不抢工具态 */
+    overlayOpen: false,
+    bottomTabOpen: false,
+    undo: () => {},
+    redo: () => {},
+    save: () => {},
+    pickTool: (_t: TreeCanvasTool) => {},
+    closeBottom: () => {},
+  });
+  shortcutCtx.current = {
+    tool,
+    overlayOpen: formulaOpen || divideOpen || fittingOpen || saveCustomerOpen || !!pendingFrame,
+    bottomTabOpen: bottomTab !== null,
+    undo: () => undoCanvas(),
+    redo: () => redoCanvas(),
+    save: () => void handleBottomSave(),
+    pickTool: (t) => handleToolChange(t),
+    closeBottom: () => setBottomTab(null),
+  };
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      const el = e.target as HTMLElement | null;
+      // 表单里打字不该触发画布动作（antd Select 的可搜索输入也是 INPUT）
+      if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable)) return;
+      const ctx = shortcutCtx.current;
+      const mod = e.ctrlKey || e.metaKey;
+      if (mod && !e.altKey) {
+        const k = e.key.toLowerCase();
+        if (k === 's') {
+          e.preventDefault();
+          ctx.save();
+          return;
+        }
+        if (k === 'z') {
+          e.preventDefault();
+          if (e.shiftKey) ctx.redo();
+          else ctx.undo();
+          return;
+        }
+        if (k === 'y') {
+          e.preventDefault();
+          ctx.redo();
+          return;
+        }
+        return;
+      }
+      if (e.altKey) return;
+      // Delete / Backspace 归画布控制器（它才拿得到 Konva 侧的选中态）
+      if (e.key === 'Escape') {
+        if (ctx.overlayOpen) return; // 对话框 / 配件面板自己处理 Esc
+        if (ctx.bottomTabOpen) {
+          e.preventDefault();
+          ctx.closeBottom();
+          return;
+        }
+        if (ctx.tool !== 'select') {
+          e.preventDefault();
+          ctx.pickTool('select');
+        }
+        return;
+      }
+      const toolKey = { '1': 'select', '2': 'framing', '3': 'split' } as const;
+      const next = toolKey[e.key as keyof typeof toolKey];
+      if (next && next !== ctx.tool) {
+        e.preventDefault();
+        ctx.pickTool(next);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
   /** 导出：材料 PDF / 材料 CSV（表格）/ 图纸 + 报价 PDF */
   const handleExport = async (kind: ExportKind) => {
     const state = useStore.getState();
     const { design, library } = state;
-    const series = library.series.find((s) => s.id === design.seriesId) ?? library.series[0];
-    // 容器树设计模式：导出统一以树模型为准
-    const model = treeModel ?? buildDesignModelFromShapes(state.shapes, state);
-    const bom = model ? computeBomFromDesignModel(model, series, library) : computeBom(design, series, library);
+    const model = treeModel ?? projectDesignModel(state);
+    if (!model) {
+      message.warning('画布为空，暂无可导出的材料或报价数据');
+      return;
+    }
+    const series = library.series.find((s) => s.id === model.seriesId) ?? library.series[0];
+    const exportDesign = {
+      ...design,
+      openingW: model.openingW,
+      openingH: model.openingH,
+      seriesId: model.seriesId,
+      glassId: model.glassId,
+    };
+    const bom = computeBomFromDesignModel(model, series, library);
 
     if (kind === 'material-csv') {
       downloadText(`${design.name}-材料清单.csv`, bomToCsv(bom, `${design.name} 门窗材料清单`));
@@ -549,22 +589,20 @@ export function DesignStudio({
     const imageDataUrl = treeCanvasRef.current?.exportImage() ?? undefined;
 
     if (kind === 'material-pdf') {
-      await printHTML(buildMaterialsPdfHtml({ design, series, bom, imageDataUrl }));
+      await printHTML(buildMaterialsPdfHtml({ design: exportDesign, series, bom, imageDataUrl }));
     } else if (kind === 'quote-pdf') {
       const sashCount =
         model?.components.filter((c) => c.kind === 'casementSash' || c.kind === 'slidingSash' || c.kind === 'topHungSash').length ?? 0;
-      const specialShape =
-        state.shapes.some((s) => s.type === 'trapezoid' || s.type === 'arch' || s.type === 'gothic') ||
-        !!model?.components.find((c) => c.kind === 'outerFrame' && c.shape && c.shape !== 'rect');
-      const quote = quoteFromBom(design, series, library, bom.items, defaultQuoteRuleSet, state.windowCount, state.discountRate, {
+      const specialShape = !!model?.components.find((c) => c.kind === 'outerFrame' && c.shape && c.shape !== 'rect');
+      const quote = quoteFromDesignModel(model, bom, defaultQuoteRuleSet, state.windowCount, state.discountRate, {
         sashCount,
         specialShape,
         color: state.orderConfig.outerColor,
         hardware: state.orderConfig.hardware,
-        glassId: design.glassId,
+        glassId: model.glassId,
       });
       await printHTML(
-        buildDrawingQuotePdfHtml({ design, series, bom, quote, windowCount: state.windowCount, imageDataUrl }),
+        buildDrawingQuotePdfHtml({ design: exportDesign, series, bom, quote, windowCount: state.windowCount, imageDataUrl }),
       );
     } else if (kind === 'cutting-pdf') {
       // 工艺校验：存在 error 级问题时阻止导出生产下料单（右侧面板可定位修正）
@@ -575,7 +613,7 @@ export function DesignStudio({
         return;
       }
       const cutting = computeCuttingList(bom, series);
-      await printHTML(buildCuttingPdfHtml({ design, series, cutting, imageDataUrl }));
+      await printHTML(buildCuttingPdfHtml({ design: exportDesign, series, cutting, imageDataUrl }));
     }
     message.success('已生成 PDF：请在打印对话框中选择「另存为 PDF」');
   };
@@ -663,7 +701,7 @@ export function DesignStudio({
             focusedUnitId={focusedUnitId}
             selectedCombinerId={selectedCombinerId}
             tool={tool}
-            onChange={(t) => setFocusedTree(t)}
+            onAction={dispatchCanvas}
             onPlaceRequest={(areaId) => {
               if (placeSpec) applyPlace(areaId, placeSpec);
             }}
@@ -689,10 +727,10 @@ export function DesignStudio({
               boxShadow: '0 2px 8px rgba(0,0,0,0.08)',
             }}
           >
-            <Tooltip title="撤销">
+            <Tooltip title="撤销（Ctrl+Z）">
               <Button size="small" type="text" icon={<UndoOutlined />} disabled={!canUndoCanvas} onClick={() => undoCanvas()} />
             </Tooltip>
-            <Tooltip title="恢复">
+            <Tooltip title="恢复（Ctrl+Shift+Z / Ctrl+Y）">
               <Button size="small" type="text" icon={<RedoOutlined />} disabled={!canRedoCanvas} onClick={() => redoCanvas()} />
             </Tooltip>
             <Tooltip title="删除选中（Delete）">
@@ -709,8 +747,7 @@ export function DesignStudio({
                 value={windowTree ? windowTree.frameOpenSides ?? [] : []}
                 onChange={(v: FrameSide[]) => {
                   if (!windowTree) return;
-                  windowTree.frameOpenSides = v.length && v.length < 4 ? v : undefined;
-                  setFocusedTree({ ...windowTree });
+                  dispatchCanvas({ type: 'patch-tree', patch: { frameOpenSides: v.length && v.length < 4 ? v : undefined } });
                 }}
                 options={[
                   { value: 'up', label: '缺上边' },
@@ -787,7 +824,8 @@ export function DesignStudio({
             if (!windowTree || !selectedLeafArea) return null;
             const area = selectedLeafArea;
             const sash = area.sash;
-            const apply = (mut: () => void) => { mut(); setFocusedTree({ ...windowTree }); };
+            const applyTree = (patch: Partial<WindowTree>) => dispatchCanvas({ type: 'patch-tree', patch });
+            const applySash = (patch: Partial<WindowSashSpec>) => dispatchCanvas({ type: 'patch-sash', areaId: area.id, patch });
             const shownSashWidth = windowTree.sashWidthMm ?? windowTree.frameWidthMm + 10;
             const shownMuntinWidth = windowTree.muntinWidthMm ?? DEFAULT_MUNTIN_MM;
             const shownMeetingWidth = windowTree.meetingWidthMm ?? DEFAULT_MEETING_MM;
@@ -823,7 +861,7 @@ export function DesignStudio({
                       max={120}
                       step={5}
                       value={shownMuntinWidth}
-                      onChange={(v) => { if (v != null) apply(() => { windowTree.muntinWidthMm = v; }); }}
+                      onChange={(v) => { if (v != null) applyTree({ muntinWidthMm: v }); }}
                       style={{ width: 68 }}
                     />
                   </Space>
@@ -837,7 +875,7 @@ export function DesignStudio({
                       max={2000}
                       step={10}
                       value={windowTree.muntinSagittaMm ?? 0}
-                      onChange={(v) => { apply(() => { windowTree.muntinSagittaMm = v || undefined; }); }}
+                      onChange={(v) => { applyTree({ muntinSagittaMm: v || undefined }); }}
                       style={{ width: 72 }}
                     />
                   </Space>
@@ -851,7 +889,7 @@ export function DesignStudio({
                       max={200}
                       step={1}
                       value={shownSashWidth}
-                      onChange={(v) => { if (v != null) apply(() => { windowTree.sashWidthMm = v; }); }}
+                      onChange={(v) => { if (v != null) applyTree({ sashWidthMm: v }); }}
                       style={{ width: 78 }}
                     />
                   </Space>
@@ -860,7 +898,7 @@ export function DesignStudio({
                   <Tooltip title="对开扇＝一个构件两片扇：中缝是两根「对开料」（不加中梃），两叶各自外向合页、各自把手贴中缝，玻璃拆两块">
                     <Checkbox
                       checked={sash.leaves === 2}
-                      onChange={(e) => apply(() => { if (area.sash) area.sash.leaves = e.target.checked ? 2 : undefined; })}
+                      onChange={(e) => applySash({ leaves: e.target.checked ? 2 : undefined })}
                     >
                       <span style={{ fontSize: 12 }}>对开（两扇）</span>
                     </Checkbox>
@@ -874,7 +912,7 @@ export function DesignStudio({
                         size="small"
                         style={{ width: 96 }}
                         value={sash.infill ?? 'glass'}
-                        onChange={(v) => apply(() => { if (area.sash) area.sash.infill = v === 'glass' ? undefined : v; })}
+                        onChange={(v) => applySash({ infill: v === 'glass' ? undefined : v })}
                         options={[
                           { value: 'glass', label: '玻璃' },
                           { value: 'louver', label: '百叶帘片' },
@@ -894,7 +932,7 @@ export function DesignStudio({
                         max={1200}
                         step={10}
                         value={shownPanelHeight}
-                        onChange={(v) => { if (v != null) apply(() => { windowTree.panelHeightMm = v; }); }}
+                        onChange={(v) => { if (v != null) applyTree({ panelHeightMm: v }); }}
                         style={{ width: 78 }}
                       />
                     </Space>
@@ -910,7 +948,7 @@ export function DesignStudio({
                         max={400}
                         step={10}
                         value={shownLouverPitch}
-                        onChange={(v) => { if (v != null) apply(() => { windowTree.louverPitchMm = v; }); }}
+                        onChange={(v) => { if (v != null) applyTree({ louverPitchMm: v }); }}
                         style={{ width: 78 }}
                       />
                     </Space>
@@ -926,7 +964,7 @@ export function DesignStudio({
                         max={200}
                         step={1}
                         value={shownMeetingWidth}
-                        onChange={(v) => { if (v != null) apply(() => { windowTree.meetingWidthMm = v; }); }}
+                        onChange={(v) => { if (v != null) applyTree({ meetingWidthMm: v }); }}
                         style={{ width: 78 }}
                       />
                     </Space>
@@ -936,7 +974,7 @@ export function DesignStudio({
                   <Space size={4}>
                     <Checkbox
                       checked={h.show !== false}
-                      onChange={(e) => apply(() => { if (area.sash) area.sash.handle = { ...h, show: e.target.checked }; })}
+                      onChange={(e) => applySash({ handle: { ...h, show: e.target.checked } })}
                     >
                       <span style={{ fontSize: 12 }}>把手（可拖动）</span>
                     </Checkbox>
@@ -1027,11 +1065,17 @@ export function DesignStudio({
             onCollapse={() => setRightCollapsed(true)}
             focusShapeId={focusShapeId}
             externalModel={treeModel}
+            tree={windowTree}
+            onResizeDim={(markId, value) => treeCanvasRef.current?.applyDimEdit(markId, value)}
+            onFocusShape={(id) => {
+              setFocusShapeId(id);
+              treeCanvasRef.current?.revealNode(id);
+            }}
           />
         )}
       </div>
       {/* 底部居中工具栏：清除 / 保存 + 容器树构件事务概览 */}
-      <BottomToolbar onSave={() => void handleBottomSave()} onClear={handleClearCanvas} />
+      <BottomToolbar tree={windowTree} onSave={() => void handleBottomSave()} onClear={handleClearCanvas} />
 
       {/* CRM 保存方案：未选择客户时的守卫弹窗 */}
       <SaveSchemeModal
@@ -1216,18 +1260,19 @@ export function DesignStudio({
 
 /** 底部居中工具栏：清除 / 保存 + 容器树构件事务概览 */
 function BottomToolbar({
+  tree,
   onSave,
   onClear,
 }: {
+  tree: WindowTree | null;
   /** 底部「保存」回调（CRM 模式保存到客户 / 普通模式本地保存） */
   onSave?: () => void;
   /** 清空画布（保留窗洞尺寸） */
   onClear?: () => void;
 }) {
-  const windowTree = useStore((s) => s.windowTree);
   let muntins = 0;
   let placed = 0;
-  if (windowTree?.root) {
+  if (tree?.root) {
     const walk = (t: WindowTree) => {
       const area = t.root;
       if (!area) return;
@@ -1242,7 +1287,7 @@ function BottomToolbar({
       };
       rec(area);
     };
-    walk(windowTree);
+    walk(tree);
   }
 
   return (
@@ -1269,9 +1314,9 @@ function BottomToolbar({
           </Button>
         </Tooltip>
       </Space>
-      {windowTree ? (
+      {tree ? (
         <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-          外框 1 · 中梃 {muntins} · 已放置构件 {placed} · 提示：Delete 删除选中构件/分割，滚轮缩放，Ctrl/中键拖拽平移
+          外框 1 · 中梃 {muntins} · 已放置构件 {placed} · 提示：选中构件后在右栏键入尺寸，1/2/3 切工具，Ctrl+Z/Ctrl+Y 撤销恢复，Delete 删除，右键或中键拖拽平移
         </Typography.Text>
       ) : (
         <Typography.Text type="secondary" style={{ fontSize: 12 }}>
@@ -1322,20 +1367,19 @@ function FloatCard({ title, onClose, children }: { title: string; onClose: () =>
 }
 
 function DrawingInfo({ modelOverride }: { modelOverride?: DesignModel | null }) {
-  const design = useStore((s) => s.design);
   const library = useStore((s) => s.library);
-  const shapes = useStore((s) => s.shapes);
-  const series = library.series.find((s) => s.id === design.seriesId) ?? library.series[0];
-  const geometry = computeGeometry(design, series);
-  const model = modelOverride ?? buildDesignModelFromShapes(shapes, useStore.getState());
+  const model = modelOverride ?? projectDesignModel(useStore.getState());
+  const seriesId = useStore(selectCurrentSeriesId);
+  const series = library.series.find((s) => s.id === (model?.seriesId ?? seriesId)) ?? library.series[0];
   const componentCount = model?.components.length ?? 0;
   const mullionCount = model?.components.filter((c) => c.kind === 'mullion').length ?? 0;
+  const frameCount = model?.components.filter((c) => c.kind === 'outerFrame').length ?? 0;
+  const windowTypes = [...new Set(model?.components.map((c) => c.windowType).filter(Boolean) ?? [])].join(' / ') || '—';
   const rows: [string, string][] = [
     ['产品系列', series.name],
-    ['窗型', design.panels.map((p) => p.windowType).join(' / ')],
-    ['洞口尺寸', `${design.openingW} × ${design.openingH} mm`],
-    ['外框尺寸', `${geometry.sizes.frameOuterW} × ${geometry.sizes.frameOuterH} mm`],
-    ['扇面数量', String(design.panels.length)],
+    ['窗型', windowTypes],
+    ['洞口尺寸', model ? `${model.openingW} × ${model.openingH} mm` : '—'],
+    ['外框数量', String(frameCount)],
     ['构件数量', String(componentCount)],
     ['中梃数量', String(mullionCount)],
     ['材质', `${series.cornerType}° 组角 / 断桥铝`],

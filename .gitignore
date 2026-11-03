@@ -9,6 +9,7 @@ release/
 
 # vite
 *.local
+.vite/
 
 # logs
 *.log

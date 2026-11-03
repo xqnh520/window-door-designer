@@ -5,15 +5,21 @@ import type { FormulaContext } from '@wdd/core';
 import {
   FORMULA_VARIABLES,
   PROFILE_ROLE_LABEL,
-  computeGeometry,
   evaluateFormula,
-  formulaContextFromGeometry,
-  formulaContextFromPanel,
+  formulaContextFromDesignModel,
   validateCutRows,
   type FormulaVariableDoc,
 } from '@wdd/core';
-import type { CutSide, CutScope, CutUnit, SeriesCutRow } from '@wdd/schema';
-import { useStore, type SeriesFormulaConfig } from '../store';
+import type { CutSide, CutScope, CutUnit, DesignModel, SeriesCutRow } from '@wdd/schema';
+import {
+  selectCurrentGlassId,
+  selectCurrentOpeningH,
+  selectCurrentOpeningW,
+  selectCurrentSeriesId,
+  useStore,
+  type SeriesFormulaConfig,
+} from '../store';
+import { projectAssembly } from '../canvas/modelProjection';
 
 const SIDE_OPTIONS: { value: CutSide; label: string }[] = [
   { value: 'up', label: '上' },
@@ -89,8 +95,11 @@ function cloneConfig(cfg: SeriesFormulaConfig): SeriesFormulaConfig {
 /** 系列出料行公式配置（v2 出料行表 + 公式库 + 料宽字典），对标 windoorcraft product_bar */
 export function FormulaConfigModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const library = useStore((s) => s.library);
-  const design = useStore((s) => s.design);
-  const currentSeriesId = useStore((s) => s.seriesId);
+  const assembly = useStore((s) => s.assembly);
+  const currentSeriesId = useStore(selectCurrentSeriesId);
+  const currentGlassId = useStore(selectCurrentGlassId);
+  const openingW = useStore(selectCurrentOpeningW);
+  const openingH = useStore(selectCurrentOpeningH);
   const updateSeriesFormulaConfig = useStore((s) => s.updateSeriesFormulaConfig);
 
   const [seriesId, setSeriesId] = useState<string>(currentSeriesId);
@@ -113,12 +122,19 @@ export function FormulaConfigModal({ open, onClose }: { open: boolean; onClose: 
     setActiveField(null);
   }, [open, seriesId, library]);
 
-  const previewContext = useMemo(() => {
-    const geometry = computeGeometry(design, series);
-    const base = formulaContextFromGeometry(geometry, series, design);
-    const panel = geometry.sizes.panels[0];
-    return panel ? formulaContextFromPanel(geometry, series, design, panel) : base;
-  }, [design, series]);
+  const previewModel = useMemo<DesignModel>(() => projectAssembly(assembly) ?? ({
+    id: 'formula-preview',
+    name: '空画布公式预览',
+    openingW,
+    openingH,
+    seriesId: currentSeriesId,
+    glassId: currentGlassId,
+    components: [],
+  }), [assembly, currentGlassId, currentSeriesId, openingH, openingW]);
+  const previewContext = useMemo(
+    () => formulaContextFromDesignModel(previewModel, series),
+    [previewModel, series],
+  );
 
   /** 变量分组：系统变量 + 系列料宽字典 */
   const groupedVariables = useMemo(() => {

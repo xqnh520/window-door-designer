@@ -2,7 +2,7 @@ import type { DesignComponent, DesignFitting, DesignModel, MaterialLibrary, Seri
 import { resolveProfile, type BomItem, type BomOptions, type BomResult, defaultBomOptions } from './bom.js';
 import {
   evaluateCutCondition,
-  formulaContextFromGeometry,
+  formulaContextFromDesignModel,
   formulaContextWithShowSetting,
   resolveCutCount,
   resolveCutLength,
@@ -167,26 +167,13 @@ function commonCompute(input: BomCalculatorContext): BomItem[] {
   const combiners = model.components.filter((c) => c.kind === 'combiner');
   for (const cb of combiners) addCombinerItem(items, model, series, library, cb, context);
   const glassHosts = model.components.filter((c) => PANEL_KINDS.has(c.kind));
-  for (const c of glassHosts) addComponentPanelItems(items, model, series, library, c, context);
+  for (const c of glassHosts) addComponentPanelItems(items, model, series, library, c);
   return items;
 }
 
 /** 模型级基础上下文：洞口、外框内/外尺寸与系列常量 */
 function modelFormulaContext(model: DesignModel, series: SeriesSpec): FormulaContext {
-  const frameOuterW = Math.max(1, model.openingW - 2 * series.installGap);
-  const frameOuterH = Math.max(1, model.openingH - 2 * series.installGap);
-  return formulaContextFromGeometry(
-    {
-      sizes: {
-        frameOuterW,
-        frameOuterH,
-        frameInnerW: Math.max(1, frameOuterW - 2 * series.frameWidth),
-        frameInnerH: Math.max(1, frameOuterH - 2 * series.frameWidth),
-      },
-    },
-    series,
-    model,
-  );
+  return formulaContextFromDesignModel(model, series);
 }
 
 /** window 级出料行（model 语境版）：per-frame 应用，side 展开 ×count；viewEnhance 行由观景计算器单独处理 */
@@ -244,7 +231,7 @@ function addOuterFrameItems(
   }
   const hasWindowCuts = (series.cuts ?? []).some((r) => (r.scope ?? 'window') === 'window' && r.role !== 'viewEnhance');
   if (hasWindowCuts) {
-    applyModelWindowCutRows(items, model, series, library, context, frame.id, open);
+    applyModelWindowCutRows(items, model, series, library, formulaContextFromDesignModel(model, series, frame), frame.id, open);
     return;
   }
   const hasSliding = model.components.some((c) => c.kind === 'slidingSash');
@@ -489,8 +476,8 @@ function addComponentPanelItems(
   series: SeriesSpec,
   library: MaterialLibrary,
   c: DesignComponent,
-  context: FormulaContext,
 ): void {
+  const componentContext = formulaContextFromDesignModel(model, series, c);
   // 构件体系扩展：roleType 命中注册表时按 roles 出料（每角色一圈型材 + 可选玻璃），避免旧 kind 判定误算
   if (c.roleType) {
     const def = resolveComponentType(c.roleType);
@@ -546,7 +533,7 @@ function addComponentPanelItems(
     ? Math.max(1, Math.round(sashH - 2 * series.sashWidth - 2 * series.glassGap - (panelH ? panelH + series.sashWidth : 0)))
     : Math.max(1, Math.round(openH - 2 * series.glassGap));
   const panelContext: FormulaContext = {
-    ...context,
+    ...componentContext,
     panelOpenW: openW,
     panelOpenH: openH,
     sashW,

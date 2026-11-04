@@ -379,3 +379,40 @@ test('assemblySize 用显示外接，BOM / 报价 / 下料仍用加工洞口', (
     h: Math.round(layout.displayBbox.y + layout.displayBbox.h + GAP),
   });
 });
+
+test('同一装配体改夹角：加工图形与 BOM 输入逐字段不变，只有显示几何变化', () => {
+  const straight = assemblyOf([splitTree(), splitTree()], [180]);
+  const corner: WindowAssembly = {
+    ...straight,
+    combiners: [{ ...straight.combiners[0], angleDeg: 90 }],
+  };
+
+  assert.deepEqual(
+    assemblyToShapes(corner, series60, { space: 'processing' }),
+    assemblyToShapes(straight, series60, { space: 'processing' }),
+    'CRM / 加工投影不得随角度变化',
+  );
+  const cornerModel = toDesignModelAssembly(corner, CTX);
+  const straightModel = toDesignModelAssembly(straight, CTX);
+  const withoutLabel = (m: typeof cornerModel) => ({
+    ...m,
+    components: m.components.map((c) => ({ ...c, label: undefined })),
+  });
+  assert.deepEqual(
+    withoutLabel(cornerModel),
+    withoutLabel(straightModel),
+    'BOM / 报价 / 下料几何不得随角度变化',
+  );
+  // 角度只允许改变拼樘的显示名称（转角料 vs 拼樘料），料长/尺寸不变
+  const combinerOf = (m: typeof cornerModel) => m.components.find((c) => c.kind === 'combiner')!;
+  assert.equal(combinerOf(cornerModel).label, '转角料');
+  assert.equal(combinerOf(straightModel).label, '拼樘料');
+  assert.equal(combinerOf(cornerModel).w, combinerOf(straightModel).w);
+  assert.equal(combinerOf(cornerModel).h, combinerOf(straightModel).h);
+
+  const ls = layoutAssembly(straight, { installGap: GAP });
+  const lc = layoutAssembly(corner, { installGap: GAP });
+  assert.deepEqual(lc.bbox, ls.bbox, '加工包围盒与角度无关');
+  assert.notDeepEqual(lc.displayBbox, ls.displayBbox, '显示包围盒必须随角度变化');
+  assert.notDeepEqual(assemblySize(corner), assemblySize(straight));
+});

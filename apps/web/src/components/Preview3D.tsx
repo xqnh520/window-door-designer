@@ -419,20 +419,41 @@ export function Preview3D() {
       const parts: (THREE.Object3D | null)[] = [];
       // 树模式：外框本体渲染多层框料环；固定格仍"格子即板面"（不再内套框环）
       if (!windowTree || s.componentKind === 'outerFrame') {
-        parts.push(
-          makeRing(0, LIP_T, 0, LIP_W * m, frameMat, true, innerMat),
-          makeRing(0, LIP_T, (D - LIP_W) * m, LIP_W * m, frameMat, true, innerMat),
-          makeRing(BAND_R, CAP_T, 0, (GC - GROOVE / 2) * m, frameMat, true, innerMat),
-          makeRing(BAND_R, CAP_T, (GC + GROOVE / 2) * m, (D - GC - GROOVE / 2) * m, frameMat, true, innerMat),
-          makeRing(LINER_R, CAP_T + 1, (GC - GROOVE / 2 + 0.5) * m, (GROOVE - 1) * m, grooveMat),
-          makeRing(BODY_R, W, FACE_STEP * m, Dm - 2 * FACE_STEP * m, frameMat, false, innerMat),
-        );
-
-        if (beadStyle === 'sloped') {
+        const openSides = new Set(s.openSides ?? []);
+        if (openSides.size) {
+          // 缺边开放框：按实际保留的边逐根摆料，绝不能画成封闭环
+          const b = s.bbox;
+          const halfD = Dm / 2;
+          const addBar = (wMm: number, hMm: number, cxMm: number, cyMm: number) => {
+            for (const [mat, z] of [[frameMat, 0], [innerMat, halfD]] as const) {
+              const mesh = new THREE.Mesh(new THREE.BoxGeometry(wMm * m, hMm * m, halfD), mat);
+              mesh.position.set(cxMm * m, -cyMm * m, z + halfD / 2);
+              mesh.castShadow = true;
+              mesh.receiveShadow = true;
+              addOutline(mesh);
+              parts.push(mesh);
+            }
+          };
+          if (!openSides.has('up')) addBar(b.w, W, b.x + b.w / 2, b.y + W / 2);
+          if (!openSides.has('down')) addBar(b.w, W, b.x + b.w / 2, b.y + b.h - W / 2);
+          if (!openSides.has('left')) addBar(W, b.h, b.x + W / 2, b.y + b.h / 2);
+          if (!openSides.has('right')) addBar(W, b.h, b.x + b.w - W / 2, b.y + b.h / 2);
+        } else {
           parts.push(
-            makeRing(W - BEAD, W + 4, -BEAD_H * m, (BEAD_H + FACE_STEP + 0.5) * m, beadMat, true),
-            makeRing(W - BEAD, W + 4, (D - FACE_STEP - 0.5) * m, (BEAD_H + FACE_STEP + 0.5) * m, beadMat, true),
+            makeRing(0, LIP_T, 0, LIP_W * m, frameMat, true, innerMat),
+            makeRing(0, LIP_T, (D - LIP_W) * m, LIP_W * m, frameMat, true, innerMat),
+            makeRing(BAND_R, CAP_T, 0, (GC - GROOVE / 2) * m, frameMat, true, innerMat),
+            makeRing(BAND_R, CAP_T, (GC + GROOVE / 2) * m, (D - GC - GROOVE / 2) * m, frameMat, true, innerMat),
+            makeRing(LINER_R, CAP_T + 1, (GC - GROOVE / 2 + 0.5) * m, (GROOVE - 1) * m, grooveMat),
+            makeRing(BODY_R, W, FACE_STEP * m, Dm - 2 * FACE_STEP * m, frameMat, false, innerMat),
           );
+
+          if (beadStyle === 'sloped') {
+            parts.push(
+              makeRing(W - BEAD, W + 4, -BEAD_H * m, (BEAD_H + FACE_STEP + 0.5) * m, beadMat, true),
+              makeRing(W - BEAD, W + 4, (D - FACE_STEP - 0.5) * m, (BEAD_H + FACE_STEP + 0.5) * m, beadMat, true),
+            );
+          }
         }
       } 
 

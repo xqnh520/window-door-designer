@@ -4,7 +4,7 @@ import { DeleteOutlined, LeftOutlined, RedoOutlined, SaveOutlined, UndoOutlined 
 import { bomToCsv, computeBomFromDesignModel, computeCuttingList, quoteFromDesignModel, validateDesignModel, createWindowTree, MUNTIN_PATTERN_LABEL, type MuntinPattern, DEFAULT_INSTALL_GAP_MM, DEFAULT_MUNTIN_MM, DEFAULT_MEETING_MM, DEFAULT_LOUVER_PITCH_MM, DEFAULT_PANEL_HEIGHT_MM, findArea, toDesignModelAssembly, combinerDisplayLabel, CORNER_ANGLE_PRESETS, layoutTree, listComponentTypes, listFittingTypes, type ComponentTypeDef, type FittingType, type FrameShape, type FrameSide, type WindowFitting, type WindowTreeArea, type WindowTree, type WindowMuntin, type MuntinSlope, type WindowSashSpec, defaultQuoteRuleSet, FRAME_SHAPE_LABEL, TRAPEZOID_SHAPES, type GlassBarSpec, type GlassBarPattern, type FittingHost } from '@wdd/core';
 import type { DesignModel } from '@wdd/schema';
 import { sampleWindowTemplates } from '@wdd/schema';
-import { focusedTreeFromAssembly, selectCurrentDesignName, selectCurrentGlassId, selectCurrentSeriesId, useStore } from '../../store';
+import { LEGACY_BACKUP_KEY, focusedTreeFromAssembly, selectCurrentDesignName, selectCurrentGlassId, selectCurrentSeriesId, useStore } from '../../store';
 import { downloadText } from '../../util/download';
 import { buildDrawingQuotePdfHtml, buildMaterialsPdfHtml, buildCuttingPdfHtml, printHTML } from '../../util/exportPdf';
 import type { ExportKind } from './StudioTopBar';
@@ -112,6 +112,7 @@ export function DesignStudio({
   /** 斜梃模式：null=分割按拖拽主导轴自动（横/竖梃） */
   const [splitSlope, setSplitSlope] = useState<MuntinSlope | null>(null);
   const treeCanvasRef = useRef<TreeEditorCanvasHandle>(null);
+  const pendingMigration = useStore((s) => s.pendingMigration);
 
   useEffect(() => {
     treeCanvasRef.current?.setSplitSlope(splitSlope);
@@ -158,8 +159,11 @@ export function DesignStudio({
     message.success('方案 JSON 已导出，可分享给对方直接导入');
   };
   const handleImportScheme = (text: string) => {
-    if (useStore.getState().importSchemeText(text)) {
+    const st = useStore.getState();
+    if (st.importSchemeText(text)) {
       message.success('方案已导入');
+    } else if (st.pendingMigration) {
+      message.warning('方案含无法完整迁移的旧图形，请确认是否采用部分结果');
     } else {
       message.error('方案文件无效，导入失败');
     }
@@ -1254,6 +1258,39 @@ export function DesignStudio({
 
       {/* 系列/窗型自定义计算公式配置（保存后 BOM/报价/下料单实时联动） */}
       <FormulaConfigModal open={formulaOpen} onClose={() => setFormulaOpen(false)} />
+
+      {/* 旧方案迁移完整性确认：有关键几何丢失时绝不静默采用部分结果 */}
+      <Modal
+        open={!!pendingMigration}
+        title="旧方案无法完整迁移"
+        okText="仍然采用部分结果"
+        cancelText="取消导入"
+        onOk={() => {
+          useStore.getState().applyPendingMigration();
+          message.warning('已采用部分迁移结果，请逐项核对缺失构件');
+        }}
+        onCancel={() => {
+          useStore.getState().dismissPendingMigration();
+          message.info(`已取消导入，原始数据已备份到 ${LEGACY_BACKUP_KEY}`);
+        }}
+      >
+        {pendingMigration && (
+          <>
+            <Typography.Paragraph>
+              检测到 {pendingMigration.issues.filter((i) => i.critical).length} 项关键几何或构件无法完整迁移。
+              直接导入会得到不完整的窗型；取消不会改动当前画布。原始数据已备份到浏览器本地存储（
+              <Typography.Text code>{LEGACY_BACKUP_KEY}</Typography.Text>）。
+            </Typography.Paragraph>
+            <ul style={{ maxHeight: 240, overflow: 'auto', paddingLeft: 20 }}>
+              {pendingMigration.issues.map((issue, i) => (
+                <li key={`${issue.code}-${i}`} style={{ fontSize: 12, marginBottom: 4 }}>
+                  <Typography.Text type={issue.critical ? 'danger' : 'secondary'}>{issue.message}</Typography.Text>
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
+      </Modal>
     </div>
   );
 }

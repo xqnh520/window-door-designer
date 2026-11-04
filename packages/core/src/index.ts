@@ -34,4 +34,5 @@ export * from './component-registry.js';
 export * from './fitting-registry.js';
 export * from './sash-defaults.js';
 export * from './legacy-shapes.js';
+export * from './legacy-migration.js';
 export * from './assembly-display-shapes.js';

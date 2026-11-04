@@ -416,3 +416,53 @@ test('同一装配体改夹角：加工图形与 BOM 输入逐字段不变，只
   assert.notDeepEqual(lc.displayBbox, ls.displayBbox, '显示包围盒必须随角度变化');
   assert.notDeepEqual(assemblySize(corner), assemblySize(straight));
 });
+
+test('自定义外框轮廓 / 缺边：加工与显示投影逐项保留，不被形状采样覆盖', () => {
+  const local: Pt[] = [
+    { x: 70, y: 0 },
+    { x: 930, y: 0 },
+    { x: 960, y: 960 },
+    { x: 0, y: 960 },
+  ];
+  const t = createWindowTree({
+    openingW: 1000,
+    openingH: 1000,
+    seriesId: series60.id,
+    glassId: 'g-5-12a-5',
+    frameWidthMm: FW,
+    name: '自定义',
+    frameContour: local,
+    frameOpenSides: ['left', 'right'],
+  });
+  const a = assemblyFromWindowTree(t);
+  const processing = assemblyToShapes(a, series60, { space: 'processing' });
+  const frame = processing.find((s) => s.componentKind === 'outerFrame')!;
+  const contour = frame.contour!;
+  assert.equal(contour.length, local.length, '真实外轮廓必须随 CRM 投影带出');
+  contour.forEach((p, i) => {
+    approx(p.x, local[i].x + GAP, 0.01, `轮廓点 ${i} x`);
+    approx(p.y, local[i].y + GAP, 0.01, `轮廓点 ${i} y`);
+  });
+  assert.deepEqual(frame.openSides, ['left', 'right'], '缺边信息必须随投影带出');
+
+  // 3D 显示空间：转角旋转后轮廓与缺边仍在
+  const placement: UnitPlacement = { rotationDeg: 90, translate: { x: 100, y: 0 } };
+  const rotated = transformShapeForDisplay(frame, placement);
+  assert.deepEqual(rotated.openSides, ['left', 'right']);
+  assert.equal(rotated.contour?.length, local.length);
+  const rounded = (v: number) => Math.round(v * 1000) / 1000;
+  assert.deepEqual(
+    rotated.contour!.flatMap((p) => [rounded(p.x), rounded(p.y)]),
+    contour.flatMap((p) => {
+      const moved = applyPlacement(placement, p);
+      return [rounded(moved.x), rounded(moved.y)];
+    }),
+    '显示投影按同一旋转/平移变换',
+  );
+
+  // 无自定义轮廓的矩形框不凭空产生 contour（保持旧行为）
+  const plain = assemblyToShapes(assemblyFromWindowTree(tree()), series60, { space: 'processing' })
+    .find((s) => s.componentKind === 'outerFrame')!;
+  assert.equal(plain.contour, undefined);
+  assert.equal(plain.openSides, undefined);
+});

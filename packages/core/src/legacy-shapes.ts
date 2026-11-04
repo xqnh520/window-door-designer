@@ -63,10 +63,35 @@ function readSides(value: unknown): ('up' | 'down' | 'left' | 'right')[] | undef
   return out.length ? out : undefined;
 }
 
+/** 迁移诊断码：调用方据 critical 决定是否允许静默采用迁移结果 */
+export type LegacyIssueCode =
+  | 'shape-dropped'
+  | 'line-geometry-lost'
+  | 'sash-dropped'
+  | 'contour-truncated'
+  | 'no-outer-frame'
+  | 'component-unhosted'
+  | 'panel-contour-unsupported'
+  | 'frame-contour-mismatch'
+  | 'frame-tree-failed'
+  | 'frames-not-linear'
+  | 'frames-not-joined'
+  | 'unit-tree-failed';
+
+export interface LegacyIssue {
+  code: LegacyIssueCode;
+  message: string;
+  shapeId?: string;
+  /** true = 几何/构件已丢失，迁移结果不完整，必须提示用户确认 */
+  critical: boolean;
+}
+
 export interface LegacyNormalizeReport {
   shapes: LegacyShape[];
   /** 被丢弃的候选条目数（原始 JSON 仍应由调用方备份，不得只依赖迁移结果） */
   dropped: number;
+  /** 逐项丢失原因；dropped 只统计数量，issues 用于向用户解释 */
+  issues: LegacyIssue[];
 }
 
 function finite(value: unknown): value is number {
@@ -79,12 +104,31 @@ function readPoint(value: unknown): LegacyPoint | undefined {
   return finite(p.x) && finite(p.y) ? { x: p.x, y: p.y } : undefined;
 }
 
-function readPointList(value: unknown): LegacyPoint[] | undefined {
-  if (!Array.isArray(value)) return undefined;
+function readPointList(
+  value: unknown,
+  shapeId: string,
+  field: 'corners' | 'contour',
+  issues: LegacyIssue[],
+): LegacyPoint[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) {
+    issues.push({ code: 'contour-truncated', shapeId, critical: true, message: `图形 ${shapeId} 的 ${field} 不是点列表，已丢弃` });
+    return undefined;
+  }
+  if (!value.length) return undefined;
   const pts = value.map(readPoint).filter((p): p is LegacyPoint => !!p);
+  if (pts.length < 3 || pts.length !== value.length) {
+    issues.push({
+      code: 'contour-truncated',
+      shapeId,
+      critical: true,
+      message: `图形 ${shapeId} 的 ${field} 有 ${value.length - pts.length} 个无效点，仅保留 ${pts.length} 个；轮廓不完整`,
+    });
+  }
   return pts.length >= 3 ? pts : undefined;
 }
 
+/** 面状图形（外框/分格）：宽高必须为正，否则无法表达轮廓 */
 function readBox(value: unknown): { x: number; y: number; w: number; h: number } | undefined {
   if (!value || typeof value !== 'object') return undefined;
   const b = value as Record<string, unknown>;
@@ -93,9 +137,39 @@ function readBox(value: unknown): { x: number; y: number; w: number; h: number }
   return { x: b.x as number, y: b.y as number, w: b.w as number, h: b.h as number };
 }
 
-function readSashes(value: unknown): LegacySashData[] | undefined {
-  if (!Array.isArray(value)) return undefined;
+/**
+ * 直线图形：允许某一维为 0（旧数据的竖梃 w=0 / 横梃 h=0），几何由中心线 ± 料厚重建。
+ * 仅当宽高都为 0 且 p1/p2 也无法给出真实线段时才判为无法恢复。
+ */
+function readLineBox(
+  value: unknown,
+  p1: LegacyPoint | undefined,
+  p2: LegacyPoint | undefined,
+): { x: number; y: number; w: number; h: number } | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const b = value as Record<string, unknown>;
+  if (!['x', 'y', 'w', 'h'].every((k) => finite(b[k]))) return undefined;
+  const w = b.w as number;
+  const h = b.h as number;
+  if (w < 0 || h < 0) return undefined;
+  if (w > 0 || h > 0) return { x: b.x as number, y: b.y as number, w, h };
+  if (!p1 || !p2 || (p1.x === p2.x && p1.y === p2.y)) return undefined;
+  return {
+    x: Math.min(p1.x, p2.x),
+    y: Math.min(p1.y, p2.y),
+    w: Math.abs(p2.x - p1.x),
+    h: Math.abs(p2.y - p1.y),
+  };
+}
+
+function readSashes(value: unknown, shapeId: string, issues: LegacyIssue[]): LegacySashData[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) {
+    issues.push({ code: 'sash-dropped', shapeId, critical: true, message: `图形 ${shapeId} 的开启扇数据不是列表，已丢弃` });
+    return undefined;
+  }
   const out: LegacySashData[] = [];
+  const before = value.length;
   for (const entry of value) {
     if (!entry || typeof entry !== 'object') continue;
     const s = entry as Record<string, unknown>;
@@ -107,37 +181,61 @@ function readSashes(value: unknown): LegacySashData[] | undefined {
     if (openDirection !== 'in' && openDirection !== 'out') continue;
     out.push({ hingeSide, openDirection, rect, label: typeof s.label === 'string' ? s.label : '' });
   }
+  if (out.length < before) {
+    issues.push({
+      code: 'sash-dropped',
+      shapeId,
+      critical: true,
+      message: `图形 ${shapeId} 有 ${before - out.length} 条开启扇数据无法识别，已跳过`,
+    });
+  }
   return out.length ? out : undefined;
 }
 
 /** 宽松读取历史 JSON：保留能识别的字段，无法识别的条目计入 dropped，不静默当成空数据。 */
 export function normalizeLegacyShapesWithReport(value: unknown): LegacyNormalizeReport {
-  if (!Array.isArray(value)) return { shapes: [], dropped: 0 };
+  if (!Array.isArray(value)) return { shapes: [], dropped: 0, issues: [] };
   const result: LegacyShape[] = [];
+  const issues: LegacyIssue[] = [];
   let dropped = 0;
   for (const candidate of value) {
     if (!candidate || typeof candidate !== 'object') {
       dropped += 1;
+      issues.push({ code: 'shape-dropped', critical: true, message: '旧画布存在无法解析的图形条目，已丢弃' });
       continue;
     }
     const raw = candidate as Record<string, unknown>;
-    const bbox = readBox(raw.bbox);
-    if (typeof raw.id !== 'string' || !READABLE_SHAPE_TYPES.has(raw.type as string) || !bbox) {
+    const shapeId = typeof raw.id === 'string' ? raw.id : undefined;
+    const isLine = raw.type === 'line';
+    const p1 = readPoint(raw.p1);
+    const p2 = readPoint(raw.p2);
+    const bbox = isLine ? readLineBox(raw.bbox, p1, p2) : readBox(raw.bbox);
+    if (!shapeId || !READABLE_SHAPE_TYPES.has(raw.type as string) || !bbox) {
       dropped += 1;
+      issues.push({
+        code: isLine ? 'line-geometry-lost' : 'shape-dropped',
+        shapeId,
+        critical: true,
+        message: shapeId
+          ? isLine
+            ? `直线 ${shapeId} 的 bbox 与 p1/p2 都无法还原中心线，已丢弃`
+            : `图形 ${shapeId} 的尺寸或类型无法识别，已丢弃`
+          : '旧画布存在缺少 id 或尺寸的图形条目，已丢弃',
+      });
       continue;
     }
     const shape = raw as unknown as LegacyShape;
-    const sashList = readSashes(raw.sashes);
+    const sashList = readSashes(raw.sashes, shapeId, issues);
     result.push({
       ...shape,
-      id: raw.id,
+      id: shapeId,
       type: raw.type as LegacyShape['type'],
       bbox,
       topRatio: finite(raw.topRatio) ? raw.topRatio : 1,
-      corners: readPointList(raw.corners),
-      contour: readPointList(raw.contour),
-      p1: readPoint(raw.p1),
-      p2: readPoint(raw.p2),
+      corners: readPointList(raw.corners, shapeId, 'corners', issues),
+      contour: readPointList(raw.contour, shapeId, 'contour', issues),
+      p1,
+      p2,
       widthMm: finite(raw.widthMm) && raw.widthMm > 0 ? raw.widthMm : undefined,
       curve: raw.curve && typeof raw.curve === 'object' && finite((raw.curve as Record<string, unknown>).sagittaMm)
         ? { sagittaMm: (raw.curve as Record<string, number>).sagittaMm }
@@ -148,7 +246,7 @@ export function normalizeLegacyShapesWithReport(value: unknown): LegacyNormalize
       openSides: readSides(raw.openSides),
     });
   }
-  return { shapes: result, dropped };
+  return { shapes: result, dropped, issues };
 }
 
 /** 宽松读取历史 JSON，并在导入边界补齐旧版本缺失的字段。 */
@@ -159,11 +257,30 @@ export function normalizeLegacyShapes(value: unknown): LegacyShape[] {
 const DEFAULT_MULLION_MM = 40;
 const AREA_TYPES = new Set<LegacyShape['type']>(['rect', 'trapezoid', 'arch', 'gothic']);
 
+export interface LegacyBuildReport {
+  model: DesignModel | null;
+  issues: LegacyIssue[];
+}
+
 /** 旧 ShapeModel JSON → DesignModel（一次性导入解析；不改变运行时状态）。 */
 export function buildDesignModelFromLegacyShapes(shapes: LegacyShape[], state: LegacyImportContext): DesignModel | null {
+  return buildDesignModelFromLegacyShapesWithReport(shapes, state).model;
+}
+
+/** 带诊断的迁移：不规则分格、无宿主构件、外框轮廓不匹配等丢失都不能静默吞掉。 */
+export function buildDesignModelFromLegacyShapesWithReport(
+  shapes: LegacyShape[],
+  state: LegacyImportContext,
+): LegacyBuildReport {
+  const issues: LegacyIssue[] = [];
   const areaShapes = shapes.filter((s) => AREA_TYPES.has(s.type));
   const lineShapes = shapes.filter((s) => s.type === 'line');
-  if (!areaShapes.length) return null;
+  if (!areaShapes.length) {
+    if (shapes.length) {
+      issues.push({ code: 'no-outer-frame', critical: true, message: '旧画布没有可识别的外框（面状图形），无法迁移' });
+    }
+    return { model: null, issues };
+  }
 
   // 组合窗支持：显式标记为外框的图形都作为外框；否则取最大图形兜底
   const explicitFrames = areaShapes.filter((s) => s.componentKind === 'outerFrame');
@@ -172,6 +289,15 @@ export function buildDesignModelFromLegacyShapes(shapes: LegacyShape[], state: L
   const components: DesignComponent[] = frameShapes.map((fs) => {
     const shape = frameShapeOf(fs);
     const contour = frameContourOf(fs);
+    // 树反推只接受与外框 bbox 吻合的轮廓；不吻合时轮廓会被静默丢弃，必须提前报告
+    if (contour && !contourBBoxMatches(contour, fs.bbox)) {
+      issues.push({
+        code: 'frame-contour-mismatch',
+        shapeId: fs.id,
+        critical: true,
+        message: `外框 ${fs.id} 的自定义轮廓与 bbox 不吻合，迁移后将退回形状采样（轮廓丢失）`,
+      });
+    }
     return {
       id: `c-frame-${fs.id}`,
       kind: 'outerFrame',
@@ -188,18 +314,37 @@ export function buildDesignModelFromLegacyShapes(shapes: LegacyShape[], state: L
     };
   });
 
-  /** 面板/中梃归属：中心点所在的最近外框，未命中回退第一个外框 */
+  /** 面板/中梃归属：中心点所在的外框；多框时未命中不允许猜测归属 */
+  const unhosted = new Set<string>();
   const hostFrameId = (shape: LegacyShape): string => {
     const cx = shape.bbox.x + shape.bbox.w / 2;
     const cy = shape.bbox.y + shape.bbox.h / 2;
     const host = frameShapes.find(
       (f) => cx >= f.bbox.x && cx <= f.bbox.x + f.bbox.w && cy >= f.bbox.y && cy <= f.bbox.y + f.bbox.h,
     );
+    if (!host && frameShapes.length > 1 && !unhosted.has(shape.id)) {
+      unhosted.add(shape.id);
+      issues.push({
+        code: 'component-unhosted',
+        shapeId: shape.id,
+        critical: true,
+        message: `图形 ${shape.id} 不属于任何外框，无法可靠判断归属框`,
+      });
+    }
     return `c-frame-${(host ?? frameShapes[0]).id}`;
   };
 
   for (const shape of areaShapes) {
     if (frameIds.has(shape.id)) continue;
+    // 容器树按矩形分割；不规则分格轮廓没有可表达的字段，必须报告而不是静默改形
+    if (shape.contour && !contourMatchesBox(shape.contour, shape.bbox)) {
+      issues.push({
+        code: 'panel-contour-unsupported',
+        shapeId: shape.id,
+        critical: true,
+        message: `分格 ${shape.id} 是不规则轮廓，当前容器树只能按矩形分格还原；如继续将改变轮廓形状`,
+      });
+    }
     const sashes = shape.sashes ?? [];
     if (sashes.length) {
       components.push(...sashComponentsOf(shape, hostFrameId(shape)));
@@ -230,14 +375,50 @@ export function buildDesignModelFromLegacyShapes(shapes: LegacyShape[], state: L
   }
 
   return {
-    id: state.design.id,
-    name: state.design.name,
-    openingW: state.design.openingW,
-    openingH: state.design.openingH,
-    seriesId: state.design.seriesId,
-    glassId: state.design.glassId,
-    components,
+    model: {
+      id: state.design.id,
+      name: state.design.name,
+      openingW: state.design.openingW,
+      openingH: state.design.openingH,
+      seriesId: state.design.seriesId,
+      glassId: state.design.glassId,
+      components,
+    },
+    issues,
   };
+}
+
+/** 轮廓包围盒是否与外框矩形吻合（与 treeFromDesignModel 的 outerContourOf 同口径） */
+function contourBBoxMatches(pts: LegacyPoint[], box: { x: number; y: number; w: number; h: number }): boolean {
+  const xs = pts.map((p) => p.x);
+  const ys = pts.map((p) => p.y);
+  const eps = 2;
+  return (
+    Math.abs(Math.min(...xs) - box.x) <= eps &&
+    Math.abs(Math.min(...ys) - box.y) <= eps &&
+    Math.abs(Math.max(...xs) - (box.x + box.w)) <= eps &&
+    Math.abs(Math.max(...ys) - (box.y + box.h)) <= eps
+  );
+}
+
+/** 轮廓是否为某个 bbox 的矩形四角（2mm 容差）；用于判断容器树能否无损表达 */
+function contourMatchesBox(pts: LegacyPoint[], box: { x: number; y: number; w: number; h: number }): boolean {
+  if (pts.length !== 4) return false;
+  const corners = [
+    { x: box.x, y: box.y },
+    { x: box.x + box.w, y: box.y },
+    { x: box.x + box.w, y: box.y + box.h },
+    { x: box.x, y: box.y + box.h },
+  ];
+  const used = new Set<number>();
+  for (const p of pts) {
+    const idx = corners.findIndex(
+      (c, i) => !used.has(i) && Math.abs(p.x - c.x) <= 2 && Math.abs(p.y - c.y) <= 2,
+    );
+    if (idx < 0) return false;
+    used.add(idx);
+  }
+  return used.size === 4;
 }
 
 /** 旧开口扇 → 单个/对开扇构件；宿主矩形只用于定位，树反推仍由外框内腔决定 */

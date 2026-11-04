@@ -3,10 +3,12 @@ import assert from 'node:assert/strict';
 import { series60, type DesignModel } from '@wdd/schema';
 import {
   buildDesignModelFromLegacyShapes,
+  buildDesignModelFromLegacyShapesWithReport,
   normalizeLegacyShapes,
   normalizeLegacyShapesWithReport,
   type LegacyShape,
 } from '../src/legacy-shapes.js';
+import { migrateLegacyShapes } from '../src/legacy-migration.js';
 import { treeFromDesignModel } from '../src/window-tree-builder.js';
 import {
   toDesignModel,
@@ -148,7 +150,7 @@ test('竖中梃：bbox 宽度退化为 0 也按中心线 ± 料厚/2 重建，�
   const line = shape({
     id: 'v',
     type: 'line',
-    bbox: { x: 500, y: 80, w: 0.001, h: 840 },
+    bbox: { x: 500, y: 80, w: 0, h: 840 },
     widthMm: 40,
     componentKind: 'mullion',
   });
@@ -164,7 +166,7 @@ test('横中梃：bbox 高度退化为 0 也按中心线 ± 料厚/2 重建', ()
   const line = shape({
     id: 'h',
     type: 'line',
-    bbox: { x: 80, y: 500, w: 840, h: 0.001 },
+    bbox: { x: 80, y: 500, w: 840, h: 0 },
     widthMm: 40,
     componentKind: 'mullion',
   });
@@ -173,6 +175,35 @@ test('横中梃：bbox 高度退化为 0 也按中心线 ± 料厚/2 重建', ()
   approx(m.y + m.h / 2, 500, 0.01, '中心线 y');
   approx(m.h, 40, 0.01, '料厚');
   approx(m.w, 840, 0.01, '长度');
+});
+
+test('零尺寸直线：bbox 两维都为 0 时由 p1/p2 恢复中心线，按料厚重建', () => {
+  const line = shape({
+    id: 'v0',
+    type: 'line',
+    bbox: { x: 500, y: 920, w: 0, h: 0 },
+    p1: { x: 500, y: 80 },
+    p2: { x: 500, y: 920 },
+    widthMm: 40,
+    componentKind: 'mullion',
+  });
+  const m = migrate([frame(), line]).components.find((c) => c.kind === 'mullion')!;
+  assert.equal(m.slope, undefined);
+  assert.equal(m.thicknessMm, 40);
+  approx(m.x + m.w / 2, 500, 0.01, '中心线 x');
+  approx(m.y, 80, 0.01, '起点 y');
+  approx(m.h, 840, 0.01, '长度');
+});
+
+test('零尺寸直线无法恢复中心线：丢弃并报告 line-geometry-lost', () => {
+  const raw = [
+    frame(),
+    { id: 'lost', type: 'line', bbox: { x: 500, y: 500, w: 0, h: 0 }, widthMm: 40, componentKind: 'mullion' },
+  ];
+  const report = normalizeLegacyShapesWithReport(raw);
+  assert.equal(report.shapes.length, 1, '只有外框可读');
+  assert.equal(report.dropped, 1);
+  assert.ok(report.issues.some((i) => i.code === 'line-geometry-lost' && i.shapeId === 'lost' && i.critical));
 });
 
 test('斜中梃：按 p1/p2 判朝向与真实长度，不按 bbox 宽高推断', () => {
@@ -593,4 +624,74 @@ test('竖梃分格 + 固定/平开：二次往返几何与业务属性不漂移'
   assert.equal(c2.hingeSide, c1.hingeSide);
   assert.equal(c2.openDirection, c1.openDirection);
   assert.equal(c2.label, c1.label);
+});
+
+// ── 多外框 / 部分迁移 ─────────────────────────────────────
+
+const MIGRATE_OPTS = { installGap: GAP, frameWidthMm: FW };
+
+test('多个外框：逐框建树，并按旧图真实间隙还原拼樘', () => {
+  const shapes = [
+    shape({ id: 'fa', type: 'rect', bbox: { x: 20, y: 20, w: 460, h: 960 }, componentKind: 'outerFrame' }),
+    panel({ id: 'ga', bbox: { x: 80, y: 80, w: 340, h: 840 } }),
+    shape({ id: 'fb', type: 'rect', bbox: { x: 520, y: 20, w: 460, h: 960 }, componentKind: 'outerFrame' }),
+    panel({ id: 'gb', bbox: { x: 580, y: 80, w: 340, h: 840 } }),
+  ];
+  const res = migrateLegacyShapes(shapes, { design: DESIGN }, MIGRATE_OPTS);
+  assert.equal(res.complete, true);
+  assert.ok(res.assembly, '应反推出装配体');
+  assert.equal(res.assembly!.units.length, 2, '两个外框都必须恢复，不能只取第一个');
+  assert.equal(res.assembly!.combiners.length, 1);
+  assert.equal(res.assembly!.combiners[0].thicknessMm, 40, '拼樘厚度按旧图真实间隙还原');
+  const leafCounts = res.assembly!.units.map(
+    (u) => toDesignModel(u.tree, CTX).components.filter((c) => c.kind !== 'outerFrame').length,
+  );
+  assert.deepEqual(leafCounts, [1, 1], '每框各自保留自己的分格');
+  assert.equal(res.assembly!.units[0].tree.openingW, 500);
+  assert.equal(res.assembly!.units[1].tree.openingW, 500);
+});
+
+test('多个外框拼接关系不可证明：不猜，返回 null + 诊断', () => {
+  const shapes = [
+    shape({ id: 'fa', type: 'rect', bbox: { x: 20, y: 20, w: 460, h: 960 }, componentKind: 'outerFrame' }),
+    shape({ id: 'fb', type: 'rect', bbox: { x: 700, y: 700, w: 460, h: 960 }, componentKind: 'outerFrame' }),
+  ];
+  const res = migrateLegacyShapes(shapes, { design: DESIGN }, MIGRATE_OPTS);
+  assert.equal(res.assembly, null);
+  assert.equal(res.complete, false);
+  assert.ok(res.issues.some((i) => i.critical && (i.code === 'frames-not-linear' || i.code === 'frames-not-joined')));
+});
+
+test('有效图形与无效图形混合导入：诊断必须为 critical，不能当完整迁移', () => {
+  const raw = [
+    frame(),
+    panel({ id: 'g' }),
+    { id: 'bad', type: 'polygon', bbox: { x: 0, y: 0, w: 10, h: 10 } },
+  ];
+  const report = normalizeLegacyShapesWithReport(raw);
+  assert.equal(report.shapes.length, 2);
+  assert.equal(report.dropped, 1);
+  assert.ok(report.issues.some((i) => i.critical));
+  const res = migrateLegacyShapes(report.shapes, { design: DESIGN }, MIGRATE_OPTS);
+  const all = [...report.issues, ...res.issues];
+  assert.ok(all.some((i) => i.critical), '调用方必须合并规范化诊断后才能判断完整性');
+  assert.ok(res.assembly, '可识别的部分仍能构建，供用户确认后采用');
+});
+
+test('不规则分格：产出 panel-contour-unsupported 诊断，不静默改形', () => {
+  const irregular = panel({
+    id: 'irregular',
+    contour: [
+      { x: 80, y: 80 },
+      { x: 900, y: 80 },
+      { x: 900, y: 600 },
+      { x: 500, y: 920 },
+      { x: 80, y: 920 },
+    ],
+  });
+  const built = buildDesignModelFromLegacyShapesWithReport([frame(), irregular], { design: DESIGN });
+  assert.ok(built.model);
+  assert.ok(built.issues.some((i) => i.code === 'panel-contour-unsupported' && i.critical));
+  const res = migrateLegacyShapes([frame(), irregular], { design: DESIGN }, MIGRATE_OPTS);
+  assert.equal(res.complete, false);
 });

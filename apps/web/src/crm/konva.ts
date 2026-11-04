@@ -13,7 +13,7 @@ import {
   useStore,
 } from '../store';
 import { assemblyToShapes } from '../canvas/shapes3d';
-import { buildDesignModelFromLegacyShapes, normalizeLegacyShapesWithReport } from '../canvas/legacyShapesImport';
+import { normalizeLegacyShapesWithReport } from '../canvas/legacyShapesImport';
 import { projectDesignModel } from '../canvas/modelProjection';
 import type { ColorConfig, DesignScheme, ShapeModelJson } from './types';
 
@@ -66,27 +66,25 @@ export function prepareCrmScheme(scheme: DesignScheme | null): void {
     return;
   }
   const seriesId = seriesNameToId(scheme.seriesName, st.library, selectCurrentSeriesId(st));
-  // 先纯构建验证一遍：失败就保持当前画布，绝不先清空再报错
-  if (report.shapes.length) {
-    const model = buildDesignModelFromLegacyShapes(report.shapes, {
-      design: {
-        id: scheme.id,
-        name: scheme.name,
-        openingW: scheme.totalWidth,
-        openingH: scheme.totalHeight,
-        seriesId,
-        glassId: st.design.glassId,
-      },
-    });
-    if (!model) {
-      console.warn(`CRM 方案 ${scheme.id} 旧画布迁移失败：已备份原始数据，保留当前画布`);
-      return;
-    }
-  }
-  // 先断开上一方案，防止尺寸/系列更新写入旧装配体。
-  st.setWindowTree(null);
-  st.setOpeningSize(scheme.totalWidth, scheme.totalHeight);
-  st.setSeries(seriesId);
-  st.setOrderConfig({ outerColor: scheme.colorConfig.outerColor, innerColor: scheme.colorConfig.innerColor });
-  st.importLegacyShapes(report.shapes);
+  // 迁移结果不完整时 importLegacyShapes 会挂起待确认，绝不先清空再报错
+  st.importLegacyShapes(report.shapes, {
+    allowReplace: true,
+    source: 'crm',
+    design: {
+      ...st.design,
+      id: scheme.id,
+      name: scheme.name,
+      openingW: scheme.totalWidth,
+      openingH: scheme.totalHeight,
+      seriesId,
+    },
+    issues: report.issues,
+    beforeApply: () => {
+      const s = useStore.getState();
+      s.setWindowTree(null);
+      s.setOpeningSize(scheme.totalWidth, scheme.totalHeight);
+      s.setSeries(seriesId);
+      s.setOrderConfig({ outerColor: scheme.colorConfig.outerColor, innerColor: scheme.colorConfig.innerColor });
+    },
+  });
 }

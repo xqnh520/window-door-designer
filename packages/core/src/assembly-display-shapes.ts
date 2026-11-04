@@ -38,6 +38,9 @@ export function treeToShapes(tree: WindowTree, _series?: SeriesSpec): LegacyShap
         type: shapeType as LegacyShape['type'],
         bbox,
         topRatio: String(shapeType).startsWith('trapezoid') ? (tree.topRatio ?? 0.6) : 1,
+        // 真实外轮廓与缺边必须随投影带出，否则 3D / CRM 会把自定义框退化成封闭采样框
+        contour: absoluteContour(el),
+        openSides: el.openSides?.length ? el.openSides : undefined,
         text: '',
         componentKind: 'outerFrame',
         materialRole: 'frame',

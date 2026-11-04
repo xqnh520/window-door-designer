@@ -6,5 +6,6 @@ export {
   normalizeLegacyShapes,
   normalizeLegacyShapesWithReport,
   buildDesignModelFromLegacyShapes,
+  migrateLegacyShapes,
 } from '@wdd/core';
-export type { LegacyNormalizeReport } from '@wdd/core';
+export type { LegacyIssue, LegacyNormalizeReport } from '@wdd/core';
